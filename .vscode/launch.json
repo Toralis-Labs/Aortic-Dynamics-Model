@@ -1,0 +1,16 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run orientnew_surface_transfer_candidate.py",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\orientnew_surface_transfer_candidate.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "env": {
+        "CONDA_DLL_SEARCH_MODIFICATION_ENABLE": "1"
+      }
+    }
+  ]
+}

@@ -1,0 +1,300 @@
+        return np.zeros((0,), dtype=int)
+
+    label_string_name, label_numeric_name = choose_cell_label_array(combined_pd)
+    string_values = get_cell_string_values(combined_pd, label_string_name) if label_string_name else []
+    numeric_values = get_cell_numeric_values(combined_pd, label_numeric_name, default=float("nan")) if label_numeric_name else []
+
+    if string_values:
+        trunk_mask = np.array(
+            [
+                normalize_name(string_values[int(cell_id)]) in TRUNK_NAME_ALIASES
+                if 0 <= int(cell_id) < len(string_values)
+                else False
+                for cell_id in surface_ids_arr
+            ],
+            dtype=bool,
+        )
+        if np.any(trunk_mask):
+            return surface_ids_arr[trunk_mask]
+
+    if numeric_values:
+        trunk_mask = np.array(
+            [
+                int(round(float(numeric_values[int(cell_id)]))) == LABEL_AORTA_TRUNK
+                if 0 <= int(cell_id) < len(numeric_values) and math.isfinite(float(numeric_values[int(cell_id)]))
+                else False
+                for cell_id in surface_ids_arr
+            ],
+            dtype=bool,
+        )
+        if np.any(trunk_mask):
+            if warnings is not None:
+                warnings.append(
+                    f"W_ZONE_TRUNK_NUMERIC_FALLBACK: no trunk surface cells matched the preferred branch-name labels; used {label_numeric_name or 'numeric label'} == {LABEL_AORTA_TRUNK}."
+                )
+            return surface_ids_arr[trunk_mask]
+
+    if warnings is not None:
+        warnings.append(
+            "W_ZONE_TRUNK_SURFACE_EMPTY: no trunk-labeled surface cells were found in the combined VTP; NeckZoneLabel will remain empty."
+        )
+    return np.zeros((0,), dtype=int)
+
+
+def project_points_to_polyline_batch(
+    path: PolylinePath,
+    points_xyz: np.ndarray,
+    chunk_size: int = 2048,
+) -> Dict[str, np.ndarray]:
+    pts = np.asarray(points_xyz, dtype=float).reshape(-1, 3)
+    n_points = int(pts.shape[0])
+    if n_points == 0:
+        return {
+            "s_abs_mm": np.zeros((0,), dtype=float),
+            "distance_mm": np.zeros((0,), dtype=float),
+            "segment_index": np.zeros((0,), dtype=int),
+            "projected_xyz": np.zeros((0, 3), dtype=float),
+        }
+
+    seg_a = np.asarray(path.points[:-1], dtype=float)
+    seg_b = np.asarray(path.points[1:], dtype=float)
+    seg_vec = seg_b - seg_a
+    seg_len = np.linalg.norm(seg_vec, axis=1)
+    seg_len2 = np.maximum(seg_len * seg_len, EPS)
+
+    s_abs_mm = np.zeros((n_points,), dtype=float)
+    distance_mm = np.zeros((n_points,), dtype=float)
+    segment_index = np.zeros((n_points,), dtype=int)
+    projected_xyz = np.zeros((n_points, 3), dtype=float)
+
+    for start in range(0, n_points, chunk_size):
+        stop = min(n_points, start + chunk_size)
+        chunk = pts[start:stop]
+        rel = chunk[:, None, :] - seg_a[None, :, :]
+        t = np.einsum("ijk,jk->ij", rel, seg_vec) / seg_len2.reshape(1, -1)
+        t = np.clip(t, 0.0, 1.0)
+        proj = seg_a[None, :, :] + t[:, :, None] * seg_vec[None, :, :]
+        diff = chunk[:, None, :] - proj
+        d2 = np.einsum("ijk,ijk->ij", diff, diff)
+        best_idx = np.argmin(d2, axis=1)
+        row_idx = np.arange(best_idx.shape[0])
+        best_t = t[row_idx, best_idx]
+        best_proj = proj[row_idx, best_idx]
+        best_d2 = d2[row_idx, best_idx]
+
+        s_abs_mm[start:stop] = path.cumulative_s[best_idx] + best_t * seg_len[best_idx]
+        distance_mm[start:stop] = np.sqrt(np.maximum(best_d2, 0.0))
+        segment_index[start:stop] = best_idx.astype(int)
+        projected_xyz[start:stop] = best_proj.astype(float)
+
+    return {
+        "s_abs_mm": s_abs_mm,
+        "distance_mm": distance_mm,
+        "segment_index": segment_index,
+        "projected_xyz": projected_xyz,
+    }
+
+
+def nearest_sample_indices(sample_s_abs_mm: np.ndarray, query_s_abs_mm: np.ndarray) -> np.ndarray:
+    sample_s = np.asarray(sample_s_abs_mm, dtype=float).reshape(-1)
+    query_s = np.asarray(query_s_abs_mm, dtype=float).reshape(-1)
+    if sample_s.size == 0 or query_s.size == 0:
+        return np.zeros((query_s.size,), dtype=int)
+
+    hi = np.searchsorted(sample_s, query_s, side="left")
+    hi = np.clip(hi, 0, sample_s.size - 1)
+    lo = np.clip(hi - 1, 0, sample_s.size - 1)
+    choose_hi = np.abs(sample_s[hi] - query_s) < np.abs(sample_s[lo] - query_s)
+    return np.where(choose_hi, hi, lo).astype(int)
+
+
+def cut_surface_with_plane(surface_pd: vtk.vtkPolyData, origin_xyz: np.ndarray, normal_xyz: np.ndarray) -> vtk.vtkPolyData:
+    plane = vtk.vtkPlane()
+    plane.SetOrigin(float(origin_xyz[0]), float(origin_xyz[1]), float(origin_xyz[2]))
+    plane.SetNormal(float(normal_xyz[0]), float(normal_xyz[1]), float(normal_xyz[2]))
+
+    cutter = vtk.vtkCutter()
+    cutter.SetInputData(surface_pd)
+    cutter.SetCutFunction(plane)
+    cutter.GenerateTrianglesOff()
+    cutter.Update()
+
+    clean = vtk.vtkCleanPolyData()
+    clean.SetInputData(cutter.GetOutput())
+    clean.Update()
+
+    stripper = vtk.vtkStripper()
+    stripper.SetInputData(clean.GetOutput())
+    stripper.JoinContiguousSegmentsOn()
+    stripper.Update()
+
+    out = vtk.vtkPolyData()
+    out.DeepCopy(stripper.GetOutput())
+    return out
+
+
+def extract_contour_candidates(
+    cut_pd: vtk.vtkPolyData,
+    origin_xyz: np.ndarray,
+    normal_xyz: np.ndarray,
+) -> List[Dict[str, Any]]:
+    if cut_pd is None or cut_pd.GetNumberOfCells() < 1 or cut_pd.GetNumberOfPoints() < 3:
+        return []
+    u, v = build_plane_basis(normal_xyz)
+    origin = np.asarray(origin_xyz, dtype=float).reshape(3)
+    candidates: List[Dict[str, Any]] = []
+
+    for ci in range(cut_pd.GetNumberOfCells()):
+        cell = cut_pd.GetCell(ci)
+        if cell is None:
+            continue
+        if cell.GetCellType() not in (vtk.VTK_POLY_LINE, vtk.VTK_LINE):
+            continue
+        ids = [int(cell.GetPointId(k)) for k in range(cell.GetNumberOfPoints())]
+        if len(ids) < 3:
+            continue
+        pts3d = np.array([cut_pd.GetPoint(pid) for pid in ids], dtype=float)
+        pts2d = np.column_stack(
+            [
+                np.dot(pts3d - origin.reshape(1, 3), u.reshape(3, 1)).reshape(-1),
+                np.dot(pts3d - origin.reshape(1, 3), v.reshape(3, 1)).reshape(-1),
+            ]
+        )
+        pts2d = remove_consecutive_duplicate_points(pts2d)
+        if pts2d.shape[0] < 3:
+            continue
+        close_gap = float(np.linalg.norm(pts2d[0] - pts2d[-1]))
+        char_len = float(np.max(np.linalg.norm(pts2d - np.mean(pts2d, axis=0).reshape(1, 2), axis=1))) if pts2d.shape[0] else 0.0
+        closed = close_gap <= max(0.75, 0.02 * max(char_len, 1.0))
+        if closed and close_gap > 1.0e-6:
+            pts2d = np.vstack([pts2d, pts2d[0]])
+        pts2d_for_area = pts2d[:-1] if closed and np.linalg.norm(pts2d[0] - pts2d[-1]) < 1.0e-9 else pts2d
+        if pts2d_for_area.shape[0] < 3:
+            continue
+        area = abs(polygon_area_2d(pts2d_for_area))
+        if area <= 1.0e-6:
+            continue
+        contains_origin = point_in_polygon_2d(np.array([0.0, 0.0], dtype=float), pts2d_for_area)
+        centroid_2d = np.mean(pts2d_for_area, axis=0)
+        centroid_dist = float(np.linalg.norm(centroid_2d))
+        major, minor = major_minor_diameters_from_contour(pts2d_for_area)
+        candidates.append(
+            {
+                "cell_id": int(ci),
+                "points_3d": pts3d,
+                "points_2d": pts2d_for_area,
+                "area_mm2": float(area),
+                "contains_origin": bool(contains_origin),
+                "centroid_dist_mm": float(centroid_dist),
+                "major_mm": float(major),
+                "minor_mm": float(minor),
+                "basis_u_xyz": u.copy(),
+                "basis_v_xyz": v.copy(),
+                "closed": bool(closed),
+            }
+        )
+    return candidates
+
+
+def choose_best_contour(candidates: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not candidates:
+        return None
+    containing = [c for c in candidates if c["contains_origin"]]
+    if containing:
+        containing.sort(key=lambda c: (0 if c["closed"] else 1, -float(c["area_mm2"]), float(c["centroid_dist_mm"])))
+        return containing[0]
+    ordered = sorted(candidates, key=lambda c: (0 if c["closed"] else 1, float(c["centroid_dist_mm"]), -float(c["area_mm2"])))
+    return ordered[0]
+
+
+def measure_orthogonal_slice(surface_pd: vtk.vtkPolyData, trunk_path: PolylinePath, s_abs_mm: float) -> Optional[SliceMeasurement]:
+    origin_xyz, tangent_xyz = evaluate_path_point_and_tangent(trunk_path, s_abs_mm, ds_mm=0.5)
+    cut_pd = cut_surface_with_plane(surface_pd, origin_xyz, tangent_xyz)
+    candidates = extract_contour_candidates(cut_pd, origin_xyz, tangent_xyz)
+    contour = choose_best_contour(candidates)
+    if contour is None:
+        return None
+    area = float(contour["area_mm2"])
+    major = float(contour["major_mm"])
+    minor = float(contour["minor_mm"])
+    eq = math.sqrt(max(0.0, 4.0 * area / math.pi))
+    return SliceMeasurement(
+        sample_s_abs_mm=float(s_abs_mm),
+        origin_xyz=np.asarray(origin_xyz, dtype=float),
+        tangent_xyz=np.asarray(tangent_xyz, dtype=float),
+        basis_u_xyz=np.asarray(contour["basis_u_xyz"], dtype=float),
+        basis_v_xyz=np.asarray(contour["basis_v_xyz"], dtype=float),
+        contour_2d=np.asarray(contour["points_2d"], dtype=float),
+        contour_3d=np.asarray(contour["points_3d"], dtype=float),
+        area_mm2=area,
+        major_mm=major,
+        minor_mm=minor,
+        eq_mm=float(eq),
+        contains_origin=bool(contour["contains_origin"]),
+    )
+
+
+def find_valid_slice_near_target(
+    surface_pd: vtk.vtkPolyData,
+    trunk_path: PolylinePath,
+    target_s_abs_mm: float,
+    min_s_abs_mm: float,
+    max_s_abs_mm: float,
+    offsets_mm: Sequence[float],
+) -> Optional[SliceMeasurement]:
+    tested: set[float] = set()
+    for offset in offsets_mm:
+        s = float(clamp(target_s_abs_mm + float(offset), min_s_abs_mm, max_s_abs_mm))
+        s_key = round(s, 6)
+        if s_key in tested:
+            continue
+        tested.add(s_key)
+        result = measure_orthogonal_slice(surface_pd, trunk_path, s)
+        if result is not None:
+            return result
+    return None
+
+
+def moving_median(values: np.ndarray, window_size: int) -> np.ndarray:
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    if arr.size == 0 or window_size <= 1:
+        return arr.copy()
+    radius = window_size // 2
+    out = np.zeros_like(arr, dtype=float)
+    for i in range(arr.size):
+        lo = max(0, i - radius)
+        hi = min(arr.size, i + radius + 1)
+        segment = arr[lo:hi]
+        segment = segment[np.isfinite(segment)]
+        out[i] = float(np.median(segment)) if segment.size else float("nan")
+    return out
+
+
+def moving_mean(values: np.ndarray, window_size: int) -> np.ndarray:
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    if arr.size == 0 or window_size <= 1:
+        return arr.copy()
+    radius = window_size // 2
+    out = np.zeros_like(arr, dtype=float)
+    for i in range(arr.size):
+        lo = max(0, i - radius)
+        hi = min(arr.size, i + radius + 1)
+        segment = arr[lo:hi]
+        segment = segment[np.isfinite(segment)]
+        out[i] = float(np.mean(segment)) if segment.size else float("nan")
+    return out
+
+
+def sample_measurements_along_path(
+    surface_pd: vtk.vtkPolyData,
+    trunk_path: PolylinePath,
+    s_start_abs_mm: float,
+    s_end_abs_mm: float,
+    step_mm: float,
+) -> List[SliceMeasurement]:
+    if s_end_abs_mm < s_start_abs_mm:
+        return []
+    positions: List[float] = []
+    s = float(s_start_abs_mm)
+    while s <= s_end_abs_mm + 1.0e-6:
+        positions.append(round(float(s), 6))

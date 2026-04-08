@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<projectDescription version="1.0">
+    <images folder_name="Images">
+        <image name="OSMSC0156-cm" in_project="yes" path="OSMSC0156-cm.vti"/>
+    </images>
+    <paths folder_name="Paths"/>
+    <segmentations folder_name="Segmentations"/>
+    <models folder_name="Models"/>
+    <meshes folder_name="Meshes"/>
+    <simulations folder_name="Simulations"/>
+    <flow folder_name="flow-files"/>
+</projectDescription>

@@ -1,0 +1,7 @@
+1. 
+
+cd "C:\Users\ibrah\OneDrive\Desktop\Fluids Project\Vascular specific"
+
+2. 
+
+python "C:\Users\ibrah\OneDrive\Desktop\Fluids Project\Vascular specific\sizingnew.py" "C:\Users\ibrah\OneDrive\Desktop\Fluids Project\Vascular specific\0044_H_ABAO_AAA\0044_H_ABAO_AAA\Models\0156_0001.vtp" "C:\Users\ibrah\OneDrive\Desktop\Fluids Project\Vascular specific\evar_measurements.txt"

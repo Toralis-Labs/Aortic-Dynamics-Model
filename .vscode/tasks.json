@@ -1,0 +1,20 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Run orient script",
+      "type": "process",
+      "command": "C:\\Users\\ibrah\\miniconda3\\envs\\vmtk_env\\python.exe",
+      "args": [
+        "${workspaceFolder}\\orientnew_surface_transfer_candidate.py"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "CONDA_DLL_SEARCH_MODIFICATION_ENABLE": "1"
+        }
+      },
+      "problemMatcher": []
+    }
+  ]
+}
