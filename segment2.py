@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import heapq
 import importlib
 import json
 import math
@@ -15,7 +16,7 @@ import sys
 import traceback
 import types
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -329,6 +330,49 @@ class BoundaryProfile:
     connection_zone_score: float = 0.0
     parent_projection_point: Optional[np.ndarray] = None
     parent_projection_abscissa: Optional[float] = None
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
+class TransitionInterface:
+    interface_id: int
+    child_segment_id: int
+    parent_segment_id: int
+    contour_points: np.ndarray
+    contour_centroid: np.ndarray
+    contour_normal: np.ndarray
+    parent_projection_point: Optional[np.ndarray]
+    parent_projection_abscissa: Optional[float]
+    partition_normal: np.ndarray
+    partition_axis_u: np.ndarray
+    partition_axis_v: np.ndarray
+    confidence: float
+    connection_zone_score: float
+    method_tag: str
+    representative_child_abscissa: Optional[float] = None
+    stable_zone_start_abscissa: Optional[float] = None
+    stable_zone_end_abscissa: Optional[float] = None
+    stable_zone_start_index: int = -1
+    stable_zone_end_index: int = -1
+    representative_index: int = -1
+    local_spacing: float = 0.0
+    child_window: float = 0.0
+    parent_window: float = 0.0
+    patch_radius: float = 0.0
+    child_radius: float = 0.0
+    parent_radius: float = 0.0
+    contour_quality: float = 0.0
+    axis_stability: float = 0.0
+    synthetic: bool = False
+    low_confidence: bool = False
+    local_partition_success: bool = False
+    local_partition_mode: str = "uninitialized"
+    local_patch_cell_ids: List[int] = field(default_factory=list)
+    local_barrier_cell_ids: List[int] = field(default_factory=list)
+    local_child_cell_ids: List[int] = field(default_factory=list)
+    local_parent_cell_ids: List[int] = field(default_factory=list)
+    local_child_seed_cell_ids: List[int] = field(default_factory=list)
+    local_parent_seed_cell_ids: List[int] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
 
@@ -2028,6 +2072,193 @@ def sample_abscissae(start_s: float, end_s: float, spacing: float) -> List[float
     return [float(start_s + (float(end_s) - float(start_s)) * k / float(max(n - 1, 1))) for k in range(n)]
 
 
+def local_interface_spacing(
+    local_radius: float,
+    resampling_step: float,
+    connection_evidence: float = 0.0,
+    contour_quality: float = 1.0,
+    axis_stability: float = 1.0,
+) -> float:
+    base = max(0.14, 0.16 * max(2.0 * float(local_radius), 1.0), 0.38 * float(resampling_step))
+    density_scale = 1.0
+    density_scale -= 0.28 * clamp(float(connection_evidence), 0.0, 1.0)
+    density_scale -= 0.14 * clamp(1.0 - float(axis_stability), 0.0, 1.0)
+    density_scale -= 0.12 * clamp(1.0 - float(contour_quality), 0.0, 1.0)
+    return float(clamp(base * density_scale, 0.12, 0.80))
+
+
+def local_interface_window(
+    local_radius: float,
+    total_length: float,
+    spacing: float,
+    connection_evidence: float = 0.0,
+    contour_quality: float = 1.0,
+    axis_stability: float = 1.0,
+    role: str = "child",
+) -> float:
+    scale = 2.8 if role == "child" else 3.6
+    window = max(scale * max(2.0 * float(local_radius), 1.0), 4.0 * float(spacing))
+    window *= 1.0 + 0.18 * clamp(float(connection_evidence), 0.0, 1.0)
+    window *= 1.0 + 0.10 * clamp(1.0 - float(axis_stability), 0.0, 1.0)
+    window *= 1.0 + 0.08 * clamp(1.0 - float(contour_quality), 0.0, 1.0)
+    lo = min(max(3.0 * float(spacing), 0.12 * max(float(total_length), 1.0)), max(float(total_length), float(spacing)))
+    hi_factor = 0.40 if role == "child" else 0.55
+    hi = max(lo, hi_factor * max(float(total_length), float(spacing)))
+    return float(clamp(window, lo, hi))
+
+
+def escalate_transition_sampling_window(
+    center_s: float,
+    total_length: float,
+    spacing: float,
+    window: float,
+) -> List[float]:
+    half_window = max(0.6 * float(window), 2.0 * float(spacing))
+    start_s = clamp(float(center_s) - half_window, 0.0, float(total_length))
+    end_s = clamp(float(center_s) + half_window, start_s, float(total_length))
+    return sample_abscissae(start_s, end_s, max(0.5 * float(spacing), 0.12))
+
+
+def point_plane_signed_distance(point: np.ndarray, plane_origin: np.ndarray, plane_normal: np.ndarray) -> float:
+    return float(np.dot(np.asarray(point, dtype=float).reshape(3) - np.asarray(plane_origin, dtype=float).reshape(3), unit(np.asarray(plane_normal, dtype=float).reshape(3))))
+
+
+def point_to_polyline_distance(point: np.ndarray, polyline_points: np.ndarray, closed: bool = True) -> float:
+    pts = np.asarray(polyline_points, dtype=float)
+    if pts.shape[0] == 0:
+        return float("inf")
+    if pts.shape[0] == 1:
+        return float(np.linalg.norm(np.asarray(point, dtype=float).reshape(3) - pts[0]))
+    best = float("inf")
+    n_seg = pts.shape[0] if closed else pts.shape[0] - 1
+    for idx in range(max(0, n_seg)):
+        p0 = pts[idx]
+        p1 = pts[(idx + 1) % pts.shape[0]]
+        proj, _, d2 = project_point_to_segment(point, p0, p1)
+        _ = proj
+        best = min(best, math.sqrt(max(float(d2), 0.0)))
+    return float(best)
+
+
+def detect_stable_transition_zone(
+    samples: List[Dict[str, Any]],
+    scores: np.ndarray,
+    local_scale: float,
+) -> Dict[str, Any]:
+    if not samples or scores.size == 0:
+        return {
+            "success": False,
+            "representative_index": -1,
+            "start_index": -1,
+            "end_index": -1,
+            "zone_score": 0.0,
+            "smoothed_scores": np.zeros((0,), dtype=float),
+        }
+
+    smoothed = np.asarray(moving_average(scores.tolist(), 1), dtype=float)
+    qualities = np.asarray([float(s.get("quality", 0.0)) for s in samples], dtype=float)
+    axes = np.asarray([float(s.get("axis_stability", 0.0)) for s in samples], dtype=float)
+    peak_idx = int(np.argmax(smoothed))
+    peak_score = float(smoothed[peak_idx])
+    high = clamp(max(0.36, 0.82 * peak_score), 0.36, 0.92)
+    low = clamp(max(0.26, 0.66 * peak_score), 0.24, high)
+
+    start = peak_idx
+    end = peak_idx
+    misses = 0
+    while start > 0:
+        candidate = float(smoothed[start - 1])
+        if candidate >= low:
+            start -= 1
+            misses = 0
+            continue
+        misses += 1
+        if misses >= 2:
+            break
+        start -= 1
+    misses = 0
+    while end + 1 < len(samples):
+        candidate = float(smoothed[end + 1])
+        if candidate >= low:
+            end += 1
+            misses = 0
+            continue
+        misses += 1
+        if misses >= 2:
+            break
+        end += 1
+
+    zone_indices = list(range(start, end + 1))
+    has_high = any(float(smoothed[i]) >= high for i in zone_indices)
+    abscissae = [float(samples[i]["abscissa"]) for i in zone_indices]
+    span = (max(abscissae) - min(abscissae)) if abscissae else 0.0
+    representative_idx = max(
+        zone_indices,
+        key=lambda i: (
+            0.70 * float(smoothed[i])
+            + 0.20 * float(qualities[i])
+            + 0.10 * float(axes[i]),
+            -abs(i - peak_idx),
+        ),
+    )
+    zone_score = float(np.mean([smoothed[i] for i in zone_indices])) if zone_indices else 0.0
+    stable = bool(has_high and (len(zone_indices) >= 2 or span >= 0.55 * max(float(local_scale), 0.5)))
+    return {
+        "success": stable,
+        "representative_index": int(representative_idx),
+        "start_index": int(start),
+        "end_index": int(end),
+        "zone_score": float(clamp(zone_score, 0.0, 1.0)),
+        "smoothed_scores": smoothed,
+    }
+
+
+def transition_partition_frame(
+    contour_centroid: np.ndarray,
+    contour_normal: np.ndarray,
+    parent_projection_point: Optional[np.ndarray],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    normal = unit(np.asarray(contour_normal, dtype=float).reshape(3))
+    if parent_projection_point is not None:
+        axis_u = np.asarray(contour_centroid, dtype=float).reshape(3) - np.asarray(parent_projection_point, dtype=float).reshape(3)
+        axis_u = axis_u - np.dot(axis_u, normal) * normal
+        axis_u = unit(axis_u)
+    else:
+        axis_u, _ = build_orthonormal_frame(normal)
+    if np.linalg.norm(axis_u) < EPS:
+        axis_u, _ = build_orthonormal_frame(normal)
+    axis_v = unit(np.cross(normal, axis_u))
+    return normal.astype(float), axis_u.astype(float), axis_v.astype(float)
+
+
+def concatenate_segment_paths(parent_points: np.ndarray, child_points: np.ndarray) -> np.ndarray:
+    a = np.asarray(parent_points, dtype=float)
+    b = np.asarray(child_points, dtype=float)
+    if a.shape[0] == 0:
+        return b.astype(float)
+    if b.shape[0] == 0:
+        return a.astype(float)
+    if np.linalg.norm(a[-1] - b[0]) < 1e-6:
+        return np.vstack([a, b[1:]]).astype(float)
+    return np.vstack([a, b]).astype(float)
+
+
+def concatenate_segment_radii(parent_radii: Optional[np.ndarray], child_radii: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    if parent_radii is None and child_radii is None:
+        return None
+    if parent_radii is None:
+        return np.asarray(child_radii, dtype=float).copy()
+    if child_radii is None:
+        return np.asarray(parent_radii, dtype=float).copy()
+    a = np.asarray(parent_radii, dtype=float).reshape(-1)
+    b = np.asarray(child_radii, dtype=float).reshape(-1)
+    if a.size == 0:
+        return b.astype(float)
+    if b.size == 0:
+        return a.astype(float)
+    return np.concatenate([a, b[1:] if b.size > 1 else b]).astype(float)
+
+
 def plane_section_candidates(
     surface: "vtkPolyData",
     plane_origin: np.ndarray,
@@ -2506,13 +2737,33 @@ def refine_child_proximal_boundary(
     child_seg: Dict[str, Any],
     resampling_step: float,
     warnings: List[str],
-) -> Tuple[BoundaryProfile, Dict[str, Any], List[Dict[str, Any]]]:
+) -> Tuple[BoundaryProfile, Dict[str, Any], List[Dict[str, Any]], Optional[TransitionInterface]]:
     child_path = np.asarray(child_seg["path_points_oriented"], dtype=float)
     parent_path = np.asarray(parent_seg["path_points_oriented"], dtype=float)
     child_radii = child_seg.get("path_radii_oriented")
     parent_radii = parent_seg.get("path_radii_oriented")
     child_len = float(polyline_length(child_path))
     parent_len = float(polyline_length(parent_path))
+    daughter_radius = characteristic_path_radius(child_radii, fallback_radius=max(float(child_seg.get("mean_radius", 1.0)), 1.0))
+    daughter_diam = 2.0 * daughter_radius
+    parent_anchor_radius = path_radius_at_abscissa(
+        parent_path,
+        parent_radii,
+        max(parent_len - max(0.5 * float(resampling_step), 0.25), 0.0),
+        fallback_radius=max(float(parent_seg.get("mean_radius", daughter_radius)), daughter_radius),
+    )
+    child_axis0 = path_local_axis_stability(child_path, 0.0, lookahead=max(daughter_diam, resampling_step, 0.5))
+    parent_axis0 = path_local_axis_stability(parent_path, max(parent_len - daughter_diam, 0.0), lookahead=max(daughter_diam, resampling_step, 0.5))
+    child_spacing = local_interface_spacing(daughter_radius, resampling_step, contour_quality=0.75, axis_stability=child_axis0)
+    parent_spacing = local_interface_spacing(parent_anchor_radius, resampling_step, contour_quality=0.75, axis_stability=parent_axis0)
+    child_window = local_interface_window(daughter_radius, child_len, child_spacing, contour_quality=0.75, axis_stability=child_axis0, role="child")
+    parent_window = local_interface_window(parent_anchor_radius, parent_len, parent_spacing, contour_quality=0.75, axis_stability=parent_axis0, role="parent")
+    child_start_s = min(0.35 * child_spacing, 0.10 * max(daughter_diam, 1.0))
+    child_end_s = clamp(child_window, child_start_s + 0.5 * child_spacing, child_len)
+    child_samples_s = sample_abscissae(child_start_s, child_end_s, child_spacing)
+    parent_start_s = clamp(parent_len - parent_window, 0.0, parent_len)
+    parent_end_s = clamp(parent_len - 0.35 * parent_spacing, parent_start_s, parent_len)
+    parent_samples_s = sample_abscissae(parent_start_s, parent_end_s, parent_spacing)
 
     if child_len <= EPS or parent_len <= EPS:
         label = f"segment_{int(child_seg['segment_id'])}_proximal"
@@ -2526,22 +2777,40 @@ def refine_child_proximal_boundary(
             confidence=0.05,
             extra_warning="Degenerate parent or child path during junction refinement.",
         )
-        return synthetic, {"success": False, "parent_event_abscissa": float("nan"), "parent_event_score": 0.0}, []
-
-    daughter_radius = characteristic_path_radius(child_radii, fallback_radius=max(float(child_seg.get("mean_radius", 1.0)), 1.0))
-    daughter_diam = 2.0 * daughter_radius
-    spacing = section_spacing_from_diameter(daughter_diam, resampling_step=resampling_step)
-    child_window = min(max(2.75 * daughter_diam, 5.0 * spacing), max(0.30 * child_len, min(0.60 * child_len, 6.0 * daughter_diam + spacing)))
-    child_window = clamp(child_window, min(0.20 * max(child_len, spacing), max(spacing, 0.5)), max(child_len, spacing))
-    parent_window = min(max(3.50 * daughter_diam, 6.0 * spacing), max(0.25 * parent_len, min(0.65 * parent_len, 7.0 * daughter_diam + spacing)))
-    parent_window = clamp(parent_window, min(0.20 * max(parent_len, spacing), max(spacing, 0.75)), max(parent_len, spacing))
-
-    child_start_s = min(0.25 * spacing, 0.08 * max(daughter_diam, 1.0))
-    child_end_s = clamp(child_window, child_start_s + 0.5 * spacing, child_len)
-    child_samples_s = sample_abscissae(child_start_s, child_end_s, spacing)
-    parent_start_s = clamp(parent_len - parent_window, 0.0, parent_len)
-    parent_end_s = clamp(parent_len - 0.25 * spacing, parent_start_s, parent_len)
-    parent_samples_s = sample_abscissae(parent_start_s, parent_end_s, spacing)
+        interface_normal, axis_u, axis_v = transition_partition_frame(synthetic.center, synthetic.normal, None)
+        interface = TransitionInterface(
+            interface_id=-1,
+            child_segment_id=int(child_seg["segment_id"]),
+            parent_segment_id=int(parent_seg["segment_id"]),
+            contour_points=np.asarray(synthetic.profile_points, dtype=float),
+            contour_centroid=np.asarray(synthetic.center, dtype=float),
+            contour_normal=np.asarray(synthetic.normal, dtype=float),
+            parent_projection_point=None,
+            parent_projection_abscissa=None,
+            partition_normal=np.asarray(interface_normal, dtype=float),
+            partition_axis_u=np.asarray(axis_u, dtype=float),
+            partition_axis_v=np.asarray(axis_v, dtype=float),
+            confidence=float(synthetic.confidence),
+            connection_zone_score=0.0,
+            method_tag="synthetic_degenerate_interface",
+            representative_child_abscissa=0.0,
+            stable_zone_start_abscissa=0.0,
+            stable_zone_end_abscissa=0.0,
+            stable_zone_start_index=-1,
+            stable_zone_end_index=-1,
+            representative_index=-1,
+            local_spacing=float(min(child_spacing, parent_spacing)),
+            child_window=float(child_window),
+            parent_window=float(parent_window),
+            patch_radius=float(max(1.5 * daughter_diam, 3.0 * max(child_spacing, parent_spacing))),
+            child_radius=float(daughter_radius),
+            parent_radius=float(parent_anchor_radius),
+            synthetic=True,
+            low_confidence=True,
+            local_partition_mode="synthetic_degenerate",
+            warnings=list(synthetic.warnings),
+        )
+        return synthetic, {"success": False, "parent_event_abscissa": float("nan"), "parent_event_score": 0.0}, [], interface
 
     parent_prep = prepared_projection_data(parent_path, parent_radii)
     child_prep = prepared_projection_data(child_path, child_radii)
@@ -2665,6 +2934,39 @@ def refine_child_proximal_boundary(
             extra_warning="No valid child samples for coordinated parent-daughter refinement.",
         )
         warnings.append(f"W_JUNCTION_REFINEMENT_EMPTY: segment {int(child_seg['segment_id'])} used synthetic proximal boundary because no valid samples were produced.")
+        interface_normal, axis_u, axis_v = transition_partition_frame(synthetic.center, synthetic.normal, parent_event_point)
+        interface = TransitionInterface(
+            interface_id=-1,
+            child_segment_id=int(child_seg["segment_id"]),
+            parent_segment_id=int(parent_seg["segment_id"]),
+            contour_points=np.asarray(synthetic.profile_points, dtype=float),
+            contour_centroid=np.asarray(synthetic.center, dtype=float),
+            contour_normal=np.asarray(synthetic.normal, dtype=float),
+            parent_projection_point=(None if parent_event_point is None else np.asarray(parent_event_point, dtype=float)),
+            parent_projection_abscissa=(None if not math.isfinite(parent_event_s) else float(parent_event_s)),
+            partition_normal=np.asarray(interface_normal, dtype=float),
+            partition_axis_u=np.asarray(axis_u, dtype=float),
+            partition_axis_v=np.asarray(axis_v, dtype=float),
+            confidence=float(synthetic.confidence),
+            connection_zone_score=0.0,
+            method_tag="synthetic_low_confidence_interface",
+            representative_child_abscissa=float(child_start_s),
+            stable_zone_start_abscissa=float(child_start_s),
+            stable_zone_end_abscissa=float(child_start_s),
+            stable_zone_start_index=-1,
+            stable_zone_end_index=-1,
+            representative_index=-1,
+            local_spacing=float(min(child_spacing, parent_spacing)),
+            child_window=float(child_window),
+            parent_window=float(parent_window),
+            patch_radius=float(max(1.5 * daughter_diam, 3.0 * max(child_spacing, parent_spacing))),
+            child_radius=float(daughter_radius),
+            parent_radius=float(parent_anchor_radius),
+            synthetic=True,
+            low_confidence=True,
+            local_partition_mode="synthetic_low_confidence",
+            warnings=list(synthetic.warnings),
+        )
         return synthetic, {
             "success": False,
             "parent_event_abscissa": float(parent_event_s),
@@ -2672,9 +2974,157 @@ def refine_child_proximal_boundary(
             "parent_projection_point": (None if parent_event_point is None else np.asarray(parent_event_point, dtype=float)),
             "child_best_score": float(best_score),
             "daughter_ref_area": float(daughter_info["ref_area"]),
-        }, debug_records
+        }, debug_records, interface
 
-    best_sample = child_samples[best_child_idx]
+    zone = detect_stable_transition_zone(child_samples, combined_scores, local_scale=max(daughter_diam, child_spacing))
+    representative_idx = int(zone["representative_index"]) if int(zone["representative_index"]) >= 0 else int(best_child_idx)
+    if representative_idx < 0 and combined_scores.size:
+        representative_idx = int(np.argmax(combined_scores))
+
+    representative_sample = child_samples[representative_idx] if representative_idx >= 0 else None
+    representative_quality = float(representative_sample["quality"]) if representative_sample is not None else 0.0
+    representative_axis = float(representative_sample["axis_stability"]) if representative_sample is not None else 0.0
+    representative_radius = (
+        path_radius_at_abscissa(child_path, child_radii, float(representative_sample["abscissa"]), daughter_radius)
+        if representative_sample is not None
+        else daughter_radius
+    )
+    dense_child_spacing = local_interface_spacing(
+        representative_radius,
+        resampling_step=resampling_step,
+        connection_evidence=float(np.max(combined_scores)) if combined_scores.size else 0.0,
+        contour_quality=representative_quality,
+        axis_stability=representative_axis,
+    )
+    dense_parent_spacing = local_interface_spacing(
+        parent_anchor_radius,
+        resampling_step=resampling_step,
+        connection_evidence=float(parent_event_score),
+        contour_quality=representative_quality,
+        axis_stability=representative_axis,
+    )
+
+    if (not zone["success"]) or float(zone["zone_score"]) < 0.50 or dense_child_spacing < 0.90 * child_spacing:
+        dense_center = float(representative_sample["abscissa"]) if representative_sample is not None else float(child_samples[min(best_child_idx, len(child_samples) - 1)]["abscissa"])
+        child_dense_positions = escalate_transition_sampling_window(dense_center, child_len, dense_child_spacing, child_window)
+        parent_dense_center = parent_event_s if math.isfinite(parent_event_s) else max(parent_len - parent_window, 0.0)
+        parent_dense_positions = escalate_transition_sampling_window(parent_dense_center, parent_len, dense_parent_spacing, parent_window)
+
+        child_positions = sorted(set(round(v, 6) for v in child_samples_s + child_dense_positions))
+        parent_positions = sorted(set(round(v, 6) for v in parent_samples_s + parent_dense_positions))
+        child_samples_s = [float(v) for v in child_positions]
+        parent_samples_s = [float(v) for v in parent_positions]
+        child_anchor_points = [polyline_point_at_abscissa(child_path, s) for s in child_samples_s]
+        parent_anchor_points = [polyline_point_at_abscissa(parent_path, s) for s in parent_samples_s]
+        child_samples = sample_section_family(
+            surface=surface,
+            family="daughter",
+            path_points=child_path,
+            path_radii=child_radii,
+            sample_positions=child_samples_s,
+            anchor_points=child_anchor_points,
+            source_prefix=f"segment_{int(child_seg['segment_id'])}_proximal_refine_dense",
+            boundary_type="junction_profile",
+            fallback_radius=float(daughter_radius),
+            partner_path=parent_path,
+            partner_prep=parent_prep,
+            partner_label="parent",
+            segment_id=int(child_seg["segment_id"]),
+        )
+        parent_samples = sample_section_family(
+            surface=surface,
+            family="parent",
+            path_points=parent_path,
+            path_radii=parent_radii,
+            sample_positions=parent_samples_s,
+            anchor_points=parent_anchor_points,
+            source_prefix=f"segment_{int(child_seg['segment_id'])}_parent_context_dense",
+            boundary_type="junction_context",
+            fallback_radius=max(float(parent_seg.get("mean_radius", daughter_radius)), daughter_radius),
+            partner_path=child_path,
+            partner_prep=child_prep,
+            partner_label="daughter",
+            segment_id=int(child_seg["segment_id"]),
+        )
+        daughter_scores, daughter_info = compute_daughter_transition_scores(child_samples, daughter_diam)
+        parent_scores, parent_info = compute_parent_event_scores(parent_samples, daughter_diam, daughter_path=child_path)
+        parent_event_idx = int(np.argmax(parent_scores)) if parent_scores.size else -1
+        parent_event_s = float(parent_samples[parent_event_idx]["abscissa"]) if parent_event_idx >= 0 else float("nan")
+        parent_event_score = float(parent_scores[parent_event_idx]) if parent_event_idx >= 0 else 0.0
+        parent_event_point = polyline_point_at_abscissa(parent_path, parent_event_s) if parent_event_idx >= 0 else None
+
+        combined_scores = np.zeros((len(child_samples),), dtype=float)
+        debug_records = []
+        for i, sample in enumerate(child_samples):
+            projected_parent_s = float(sample["partner_abscissa"]) if math.isfinite(float(sample["partner_abscissa"])) else parent_event_s
+            near_parent_score, near_parent_s = nearest_parent_sample_score(parent_samples, parent_scores, projected_parent_s)
+            parent_consistency = 1.0 if not math.isfinite(parent_event_s) else 1.0 - clamp(abs(projected_parent_s - parent_event_s) / (1.25 * max(daughter_diam, 1.0)), 0.0, 1.0)
+            combined_scores[i] = clamp(
+                0.55 * float(daughter_scores[i])
+                + 0.25 * float(near_parent_score)
+                + 0.20 * float(parent_consistency),
+                0.0,
+                1.0,
+            )
+            sample["daughter_transition_score"] = float(daughter_scores[i])
+            sample["nearest_parent_event_score"] = float(near_parent_score)
+            sample["nearest_parent_abscissa"] = float(near_parent_s)
+            sample["combined_connection_score"] = float(combined_scores[i])
+        best_child_idx = int(np.argmax(combined_scores)) if combined_scores.size else -1
+        best_score = float(combined_scores[best_child_idx]) if best_child_idx >= 0 else 0.0
+        zone = detect_stable_transition_zone(child_samples, combined_scores, local_scale=max(daughter_diam, dense_child_spacing))
+
+        for i, sample in enumerate(child_samples):
+            prof = sample["best_profile"]
+            debug_records.append(
+                {
+                    "segment_id": int(child_seg["segment_id"]),
+                    "parent_segment_id": int(parent_seg["segment_id"]),
+                    "family": "daughter",
+                    "sample_index": int(sample["sample_index"]),
+                    "sample_abscissa": float(sample["abscissa"]),
+                    "score": float(sample.get("combined_connection_score", 0.0)),
+                    "quality": float(sample["quality"]),
+                    "candidate_count": int(sample["candidate_count"]),
+                    "chosen": int(i == int(zone["representative_index"]) if int(zone["representative_index"]) >= 0 else i == best_child_idx),
+                    "profile_points": np.asarray(prof.profile_points, dtype=float),
+                    "center": np.asarray(prof.center, dtype=float),
+                    "normal": np.asarray(prof.normal, dtype=float),
+                    "stable_zone_member": int(int(zone["start_index"]) <= i <= int(zone["end_index"])),
+                }
+            )
+        for i, sample in enumerate(parent_samples):
+            prof = sample["best_profile"]
+            debug_records.append(
+                {
+                    "segment_id": int(child_seg["segment_id"]),
+                    "parent_segment_id": int(parent_seg["segment_id"]),
+                    "family": "parent",
+                    "sample_index": int(sample["sample_index"]),
+                    "sample_abscissa": float(sample["abscissa"]),
+                    "score": float(parent_scores[i]) if i < parent_scores.size else 0.0,
+                    "quality": float(sample["quality"]),
+                    "candidate_count": int(sample["candidate_count"]),
+                    "chosen": int(i == parent_event_idx),
+                    "profile_points": np.asarray(prof.profile_points, dtype=float),
+                    "center": np.asarray(prof.center, dtype=float),
+                    "normal": np.asarray(prof.normal, dtype=float),
+                }
+            )
+        child_spacing = dense_child_spacing
+        parent_spacing = dense_parent_spacing
+
+    representative_idx = int(zone["representative_index"]) if int(zone["representative_index"]) >= 0 else int(best_child_idx)
+    if representative_idx < 0:
+        representative_idx = int(best_child_idx)
+    for rec in debug_records:
+        if str(rec.get("family", "")) == "daughter":
+            sample_idx = int(rec.get("sample_index", -1))
+            rec["stable_zone_member"] = int(int(zone["start_index"]) <= sample_idx <= int(zone["end_index"]))
+            rec["chosen"] = int(sample_idx == representative_idx)
+    low_confidence = representative_idx < 0 or (not zone["success"]) or float(zone["zone_score"]) < 0.42
+    best_score = float(combined_scores[representative_idx]) if representative_idx >= 0 and combined_scores.size else float(best_score)
+    best_sample = child_samples[representative_idx]
     best_profile = orient_boundary_normal(best_sample["best_profile"], best_sample["tangent"])
     projected_parent_s = float(best_sample["partner_abscissa"]) if math.isfinite(float(best_sample["partner_abscissa"])) else parent_event_s
     if not math.isfinite(projected_parent_s):
@@ -2686,7 +3136,7 @@ def refine_child_proximal_boundary(
         source=f"segment_{int(child_seg['segment_id'])}_proximal_refined",
         boundary_type="junction_profile",
         boundary_method="refined_parent_daughter_sections",
-        confidence=float(best_score),
+        confidence=float(max(best_score, float(zone["zone_score"]))),
         connection_zone_score=float(best_score),
         fallback_used=bool(low_confidence or best_profile.fallback_used),
         synthetic=bool(low_confidence and best_profile.synthetic),
@@ -2695,16 +3145,54 @@ def refine_child_proximal_boundary(
         warnings=list(best_profile.warnings),
     )
     chosen_profile = orient_boundary_normal(chosen_profile, best_sample["tangent"])
-    chosen_profile.confidence = float(clamp(best_score, 0.0, 1.0))
+    chosen_profile.confidence = float(clamp(max(best_score, float(zone["zone_score"])), 0.0, 1.0))
     chosen_profile.connection_zone_score = float(clamp(best_score, 0.0, 1.0))
     if low_confidence:
         chosen_profile.fallback_used = True
-        chosen_profile.synthetic = bool(best_profile.synthetic)
+        chosen_profile.synthetic = bool(best_profile.synthetic or chosen_profile.synthetic)
         chosen_profile.warnings.append(
-            f"W_JUNCTION_REFINEMENT_LOWCONF: segment {int(child_seg['segment_id'])} proximal refinement stayed low-confidence (score={best_score:.3f})."
+            f"W_JUNCTION_REFINEMENT_LOWCONF: segment {int(child_seg['segment_id'])} proximal refinement stayed low-confidence (score={best_score:.3f}, stable_zone={bool(zone['success'])})."
         )
+
+    child_local_radius = path_radius_at_abscissa(child_path, child_radii, float(best_sample["abscissa"]), daughter_radius)
+    parent_local_radius = path_radius_at_abscissa(parent_path, parent_radii, float(projected_parent_s), parent_anchor_radius)
+    partition_normal, axis_u, axis_v = transition_partition_frame(chosen_profile.center, chosen_profile.normal, parent_projection_point)
+    interface = TransitionInterface(
+        interface_id=-1,
+        child_segment_id=int(child_seg["segment_id"]),
+        parent_segment_id=int(parent_seg["segment_id"]),
+        contour_points=np.asarray(chosen_profile.profile_points, dtype=float),
+        contour_centroid=np.asarray(chosen_profile.center, dtype=float),
+        contour_normal=np.asarray(chosen_profile.normal, dtype=float),
+        parent_projection_point=np.asarray(parent_projection_point, dtype=float),
+        parent_projection_abscissa=float(projected_parent_s),
+        partition_normal=np.asarray(partition_normal, dtype=float),
+        partition_axis_u=np.asarray(axis_u, dtype=float),
+        partition_axis_v=np.asarray(axis_v, dtype=float),
+        confidence=float(chosen_profile.confidence),
+        connection_zone_score=float(best_score),
+        method_tag="refined_parent_daughter_interface",
+        representative_child_abscissa=float(best_sample["abscissa"]),
+        stable_zone_start_abscissa=(float(child_samples[int(zone["start_index"])]["abscissa"]) if int(zone["start_index"]) >= 0 else float(best_sample["abscissa"])),
+        stable_zone_end_abscissa=(float(child_samples[int(zone["end_index"])]["abscissa"]) if int(zone["end_index"]) >= 0 else float(best_sample["abscissa"])),
+        stable_zone_start_index=int(zone["start_index"]),
+        stable_zone_end_index=int(zone["end_index"]),
+        representative_index=int(representative_idx),
+        local_spacing=float(min(child_spacing, parent_spacing)),
+        child_window=float(child_window),
+        parent_window=float(parent_window),
+        patch_radius=float(max(1.35 * chosen_profile.diameter_eq, 2.25 * max(child_local_radius, parent_local_radius, 1.0), 3.0 * max(child_spacing, parent_spacing))),
+        child_radius=float(child_local_radius),
+        parent_radius=float(parent_local_radius),
+        contour_quality=float(best_sample["quality"]),
+        axis_stability=float(best_sample["axis_stability"]),
+        synthetic=bool(chosen_profile.synthetic),
+        low_confidence=bool(low_confidence),
+        local_partition_mode="pending",
+        warnings=list(chosen_profile.warnings),
+    )
     return chosen_profile, {
-        "success": True,
+        "success": bool(zone["success"]),
         "parent_event_abscissa": float(parent_event_s),
         "parent_event_score": float(parent_event_score),
         "parent_projection_point": np.asarray(parent_projection_point, dtype=float),
@@ -2712,25 +3200,30 @@ def refine_child_proximal_boundary(
         "child_best_abscissa": float(best_sample["abscissa"]),
         "daughter_ref_area": float(daughter_info["ref_area"]),
         "parent_ref_area": float(parent_info["ref_area"]),
-        "spacing": float(spacing),
-    }, debug_records
+        "child_spacing": float(child_spacing),
+        "parent_spacing": float(parent_spacing),
+        "stable_zone_score": float(zone["zone_score"]),
+        "stable_zone_start_abscissa": interface.stable_zone_start_abscissa,
+        "stable_zone_end_abscissa": interface.stable_zone_end_abscissa,
+    }, debug_records, interface
 
 
 def build_parent_distal_boundary_from_children(
     surface: "vtkPolyData",
     parent_seg: Dict[str, Any],
-    child_infos: List[Dict[str, Any]],
+    child_interfaces: List[TransitionInterface],
     resampling_step: float,
     warnings: List[str],
 ) -> Tuple[BoundaryProfile, List[Dict[str, Any]]]:
     parent_path = np.asarray(parent_seg["path_points_oriented"], dtype=float)
     parent_radii = parent_seg.get("path_radii_oriented")
     parent_len = float(polyline_length(parent_path))
+    parent_radius = characteristic_path_radius(parent_radii, fallback_radius=max(float(parent_seg.get("mean_radius", 1.0)), 1.0))
     if parent_len <= EPS:
         synthetic = synthetic_transition_boundary(
             center=parent_path[-1] if parent_path.shape[0] else np.zeros((3,), dtype=float),
             normal=-polyline_tangent_at_abscissa(parent_path, 0.0),
-            radius=max(float(parent_seg.get("mean_radius", 1.0)), 1.0),
+            radius=max(parent_radius, 1.0),
             label=f"segment_{int(parent_seg['segment_id'])}_distal",
             boundary_type="junction_transition_parent",
             boundary_method="synthetic_parent_low_confidence",
@@ -2739,137 +3232,86 @@ def build_parent_distal_boundary_from_children(
         )
         return synthetic, []
 
-    valid_infos = [info for info in child_infos if math.isfinite(float(info.get("parent_event_abscissa", float("nan"))))]
-    parent_radius = characteristic_path_radius(parent_radii, fallback_radius=max(float(parent_seg.get("mean_radius", 1.0)), 1.0))
-    parent_diam = 2.0 * parent_radius
-    spacing = section_spacing_from_diameter(parent_diam, resampling_step=resampling_step)
-
-    if valid_infos:
-        child_s = sorted(float(info["parent_event_abscissa"]) for info in valid_infos)
-        target_event_s = float(np.average(child_s, weights=[max(float(info.get("parent_event_score", 0.2)), 0.05) for info in valid_infos]))
-        search_start = max(0.0, min(child_s) - max(1.25 * parent_diam, 3.0 * spacing))
-        search_end = min(parent_len, max(child_s) + max(0.75 * parent_diam, 2.0 * spacing))
-    else:
-        target_event_s = max(0.0, parent_len - max(2.0 * parent_diam, 5.0 * spacing))
-        search_start = max(0.0, target_event_s - max(1.5 * parent_diam, 3.0 * spacing))
-        search_end = min(parent_len, target_event_s + max(1.0 * parent_diam, 2.0 * spacing))
-
-    samples_s = sample_abscissae(search_start, search_end, spacing)
-    anchor_points = [polyline_point_at_abscissa(parent_path, s) for s in samples_s]
-    parent_samples = sample_section_family(
-        surface=surface,
-        family="parent_distal",
-        path_points=parent_path,
-        path_radii=parent_radii,
-        sample_positions=samples_s,
-        anchor_points=anchor_points,
-        source_prefix=f"segment_{int(parent_seg['segment_id'])}_distal_refine",
-        boundary_type="junction_transition_parent",
-        fallback_radius=float(parent_radius),
-        partner_path=None,
-        partner_prep=None,
-        partner_label="children",
-        segment_id=int(parent_seg["segment_id"]),
-    )
-
-    feats = profile_scores_from_samples(parent_samples)
-    if feats["quality"].size == 0:
+    usable = [
+        iface
+        for iface in child_interfaces
+        if int(iface.parent_segment_id) == int(parent_seg["segment_id"]) and iface.contour_points.shape[0] >= 3
+    ]
+    if not usable:
         synthetic = synthetic_transition_boundary(
-            center=polyline_point_at_abscissa(parent_path, max(0.0, target_event_s - 0.5 * parent_diam)),
-            normal=-polyline_tangent_at_abscissa(parent_path, max(0.0, target_event_s - 0.5 * parent_diam)),
+            center=polyline_point_at_abscissa(parent_path, max(parent_len - 0.5 * max(parent_radius, 1.0), 0.0)),
+            normal=-polyline_tangent_at_abscissa(parent_path, max(parent_len - 0.5 * max(parent_radius, 1.0), 0.0)),
             radius=max(parent_radius, 1.0),
             label=f"segment_{int(parent_seg['segment_id'])}_distal",
             boundary_type="junction_transition_parent",
             boundary_method="synthetic_parent_low_confidence",
             confidence=0.10,
-            extra_warning="No valid parent-side samples during distal boundary refinement.",
+            extra_warning="No child-coupled transition interfaces were available for parent summary boundary.",
         )
-        warnings.append(f"W_PARENT_DISTAL_SYNTHETIC: segment {int(parent_seg['segment_id'])} used synthetic distal boundary because parent refinement produced no samples.")
+        warnings.append(f"W_PARENT_DISTAL_SYNTHETIC: segment {int(parent_seg['segment_id'])} used synthetic distal boundary because no child-coupled interface summary existed.")
         return synthetic, []
 
-    ref_area = float(np.nanmedian(feats["area"][: max(1, min(3, feats["area"].size))]))
-    ref_area = max(ref_area, math.pi * max(0.4 * parent_diam, 0.25) ** 2)
-    event_scores = np.zeros((feats["quality"].size,), dtype=float)
-    stable_scores = np.zeros((feats["quality"].size,), dtype=float)
-    boundary_scores = np.zeros((feats["quality"].size,), dtype=float)
-    for i, sample in enumerate(parent_samples):
-        area_dev = abs(float(feats["area"][i]) - ref_area) / (ref_area + EPS)
-        area_stable = 1.0 - clamp(area_dev / 0.55, 0.0, 1.0)
-        ecc_penalty = clamp(float(feats["ecc"][i]) / 0.65, 0.0, 1.0)
-        multiloop = clamp((int(sample["candidate_count"]) - 1) / 2.0, 0.0, 1.0)
-        quality = float(feats["quality"][i])
-        event_proximity = 1.0 - clamp(abs(float(sample["abscissa"]) - target_event_s) / (1.8 * max(parent_diam, 1.0)), 0.0, 1.0)
-        event_scores[i] = clamp(
-            0.28 * event_proximity
-            + 0.22 * (1.0 - area_stable)
-            + 0.20 * ecc_penalty
-            + 0.16 * multiloop
-            + 0.14 * quality,
-            0.0,
-            1.0,
-        )
-        stable_scores[i] = clamp(
-            0.38 * quality
-            + 0.28 * area_stable
-            + 0.16 * (1.0 - ecc_penalty)
-            + 0.10 * (1.0 - multiloop)
-            + 0.08 * float(sample["axis_stability"]),
-            0.0,
-            1.0,
-        )
-    event_peak_idx = int(np.argmax(event_scores))
-    event_peak_s = float(parent_samples[event_peak_idx]["abscissa"])
-    for i, sample in enumerate(parent_samples):
-        if float(sample["abscissa"]) > event_peak_s + EPS:
-            boundary_scores[i] = -1.0
-            continue
-        proximity = 1.0 - clamp((event_peak_s - float(sample["abscissa"])) / (1.25 * max(parent_diam, 1.0)), 0.0, 1.0)
-        lookahead = float(np.mean(event_scores[i : min(event_scores.size, i + 3)]))
-        boundary_scores[i] = clamp(
-            0.52 * stable_scores[i]
-            + 0.28 * proximity
-            + 0.20 * lookahead,
-            0.0,
-            1.0,
-        )
-    chosen_idx = int(np.argmax(boundary_scores))
-    chosen_score = float(boundary_scores[chosen_idx])
-    chosen_sample = parent_samples[chosen_idx]
+    usable.sort(
+        key=lambda iface: (
+            float(iface.confidence),
+            float(iface.connection_zone_score),
+            0.0 if iface.parent_projection_abscissa is None else -float(iface.parent_projection_abscissa),
+        ),
+        reverse=True,
+    )
+    chosen_interface = usable[0]
+    parent_projection_abscissa = (
+        float(chosen_interface.parent_projection_abscissa)
+        if chosen_interface.parent_projection_abscissa is not None
+        else max(parent_len - max(parent_radius, 1.0), 0.0)
+    )
+    parent_projection_point = (
+        np.asarray(chosen_interface.parent_projection_point, dtype=float)
+        if chosen_interface.parent_projection_point is not None
+        else polyline_point_at_abscissa(parent_path, parent_projection_abscissa)
+    )
+    parent_inward = -polyline_tangent_at_abscissa(parent_path, parent_projection_abscissa)
     chosen_profile = boundary_profile_from_contour(
-        contour_points=np.asarray(chosen_sample["best_profile"].profile_points, dtype=float),
-        normal_hint=-np.asarray(chosen_sample["tangent"], dtype=float),
+        contour_points=np.asarray(chosen_interface.contour_points, dtype=float),
+        normal_hint=np.asarray(parent_inward, dtype=float),
         source=f"segment_{int(parent_seg['segment_id'])}_distal_refined",
         boundary_type="junction_transition_parent",
-        boundary_method="parent_aggregated_transition_sections",
-        confidence=float(chosen_score),
-        connection_zone_score=float(event_scores[event_peak_idx]),
+        boundary_method="child_coupled_parent_transition_summary",
+        confidence=float(chosen_interface.confidence),
+        connection_zone_score=float(chosen_interface.connection_zone_score),
+        fallback_used=bool(chosen_interface.low_confidence or chosen_interface.synthetic),
+        synthetic=bool(chosen_interface.synthetic),
+        parent_projection_point=np.asarray(parent_projection_point, dtype=float),
+        parent_projection_abscissa=float(parent_projection_abscissa),
+        warnings=list(chosen_interface.warnings),
     )
-    chosen_profile = orient_boundary_normal(chosen_profile, -np.asarray(chosen_sample["tangent"], dtype=float))
-    chosen_profile.parent_projection_point = polyline_point_at_abscissa(parent_path, event_peak_s)
-    chosen_profile.parent_projection_abscissa = float(event_peak_s)
-    if chosen_score < 0.40:
+    chosen_profile = orient_boundary_normal(chosen_profile, np.asarray(parent_inward, dtype=float))
+    if len(usable) > 1:
+        chosen_profile.warnings.append(
+            f"W_PARENT_DISTAL_SUMMARY: segment {int(parent_seg['segment_id'])} has {len(usable)} child-coupled interfaces; distal boundary is a representative summary only and final partition uses per-child interfaces."
+        )
+    if float(chosen_interface.confidence) < 0.40:
         chosen_profile.fallback_used = True
         chosen_profile.warnings.append(
-            f"W_PARENT_DISTAL_LOWCONF: segment {int(parent_seg['segment_id'])} distal transition stayed low-confidence (score={chosen_score:.3f})."
+            f"W_PARENT_DISTAL_LOWCONF: segment {int(parent_seg['segment_id'])} distal summary stayed low-confidence (score={float(chosen_interface.confidence):.3f})."
         )
 
     debug_records: List[Dict[str, Any]] = []
-    for i, sample in enumerate(parent_samples):
-        prof = sample["best_profile"]
+    for i, iface in enumerate(usable):
         debug_records.append(
             {
                 "segment_id": int(parent_seg["segment_id"]),
                 "parent_segment_id": int(parent_seg["segment_id"]),
-                "family": "parent_distal",
-                "sample_index": int(sample["sample_index"]),
-                "sample_abscissa": float(sample["abscissa"]),
-                "score": float(boundary_scores[i]) if i < boundary_scores.size else 0.0,
-                "quality": float(sample["quality"]),
-                "candidate_count": int(sample["candidate_count"]),
-                "chosen": int(i == chosen_idx),
-                "profile_points": np.asarray(prof.profile_points, dtype=float),
-                "center": np.asarray(prof.center, dtype=float),
-                "normal": np.asarray(prof.normal, dtype=float),
+                "family": "parent_child_coupled",
+                "sample_index": int(i),
+                "sample_abscissa": float(iface.parent_projection_abscissa) if iface.parent_projection_abscissa is not None else 0.0,
+                "score": float(iface.confidence),
+                "quality": float(iface.contour_quality),
+                "candidate_count": 1,
+                "chosen": int(i == 0),
+                "profile_points": np.asarray(iface.contour_points, dtype=float),
+                "center": np.asarray(iface.contour_centroid, dtype=float),
+                "normal": np.asarray(iface.contour_normal, dtype=float),
             }
         )
     return chosen_profile, debug_records
@@ -2941,6 +3383,8 @@ def build_section_debug_polydata(records: List[Dict[str, Any]]) -> "vtkPolyData"
     count_arr.SetName("CandidateCount")
     chosen_arr = vtk.vtkIntArray()
     chosen_arr.SetName("Chosen")
+    stable_arr = vtk.vtkIntArray()
+    stable_arr.SetName("StableZoneMember")
 
     for rec in records:
         pts_np = np.asarray(rec["profile_points"], dtype=float)
@@ -2961,6 +3405,7 @@ def build_section_debug_polydata(records: List[Dict[str, Any]]) -> "vtkPolyData"
         qual_arr.InsertNextValue(float(rec.get("quality", 0.0)))
         count_arr.InsertNextValue(int(rec.get("candidate_count", 0)))
         chosen_arr.InsertNextValue(int(bool(rec.get("chosen", False))))
+        stable_arr.InsertNextValue(int(bool(rec.get("stable_zone_member", False))))
 
     out = vtk.vtkPolyData()
     out.SetPoints(points)
@@ -2974,6 +3419,7 @@ def build_section_debug_polydata(records: List[Dict[str, Any]]) -> "vtkPolyData"
     out.GetCellData().AddArray(qual_arr)
     out.GetCellData().AddArray(count_arr)
     out.GetCellData().AddArray(chosen_arr)
+    out.GetCellData().AddArray(stable_arr)
     return out
 
 
@@ -3033,6 +3479,372 @@ def hsv_to_rgb_uint8(h: float, s: float, v: float) -> Tuple[int, int, int]:
     else:
         r, g, b = v, p, q
     return int(round(255.0 * r)), int(round(255.0 * g)), int(round(255.0 * b))
+
+
+def build_cell_center_locator(centers: np.ndarray) -> "vtkStaticPointLocator":
+    points = vtk.vtkPoints()
+    for p in np.asarray(centers, dtype=float):
+        points.InsertNextPoint(float(p[0]), float(p[1]), float(p[2]))
+    pd = vtk.vtkPolyData()
+    pd.SetPoints(points)
+    locator = vtk.vtkStaticPointLocator()
+    locator.SetDataSet(pd)
+    locator.BuildLocator()
+    return locator
+
+
+def build_surface_cell_adjacency(surface: "vtkPolyData") -> List[List[int]]:
+    n_cells = int(surface.GetNumberOfCells())
+    neighbors: List[Set[int]] = [set() for _ in range(n_cells)]
+    edge_to_cells: Dict[Tuple[int, int], List[int]] = {}
+    id_list = vtk.vtkIdList()
+    for ci in range(n_cells):
+        surface.GetCellPoints(int(ci), id_list)
+        ids = [int(id_list.GetId(k)) for k in range(id_list.GetNumberOfIds())]
+        if len(ids) < 2:
+            continue
+        for k in range(len(ids)):
+            a = int(ids[k])
+            b = int(ids[(k + 1) % len(ids)])
+            if a == b:
+                continue
+            edge = (a, b) if a < b else (b, a)
+            edge_to_cells.setdefault(edge, []).append(int(ci))
+    for cell_ids in edge_to_cells.values():
+        uniq = sorted(set(int(v) for v in cell_ids))
+        if len(uniq) < 2:
+            continue
+        for i in range(len(uniq)):
+            for j in range(i + 1, len(uniq)):
+                neighbors[uniq[i]].add(int(uniq[j]))
+                neighbors[uniq[j]].add(int(uniq[i]))
+    return [sorted(int(v) for v in row) for row in neighbors]
+
+
+def flood_reachable_cells(
+    seed_ids: Set[int],
+    allowed_ids: Set[int],
+    adjacency: List[List[int]],
+) -> Set[int]:
+    if not seed_ids or not allowed_ids:
+        return set()
+    visited: Set[int] = set(int(v) for v in seed_ids if int(v) in allowed_ids)
+    queue: List[int] = list(sorted(visited))
+    head = 0
+    while head < len(queue):
+        cur = int(queue[head])
+        head += 1
+        for nei in adjacency[cur]:
+            nei = int(nei)
+            if nei not in allowed_ids or nei in visited:
+                continue
+            visited.add(nei)
+            queue.append(nei)
+    return visited
+
+
+def segment_relative_distance(
+    point: np.ndarray,
+    segment: Dict[str, Any],
+) -> Tuple[float, float, float]:
+    proj = distance_to_prepared_polyline(np.asarray(point, dtype=float).reshape(3), segment["projection"])
+    radius = max(float(proj["radius"]), float(segment.get("mean_radius", 1.0)), 1.0)
+    rel = float(math.sqrt(max(float(proj["distance2"]), 0.0)) / radius)
+    return rel, float(proj["abscissa"]), float(radius)
+
+
+def partition_transition_interface_on_surface(
+    centers: np.ndarray,
+    adjacency: List[List[int]],
+    interface: TransitionInterface,
+    segment_lookup: Dict[int, Dict[str, Any]],
+) -> Dict[str, Any]:
+    child_seg = segment_lookup.get(int(interface.child_segment_id))
+    parent_seg = segment_lookup.get(int(interface.parent_segment_id))
+    if child_seg is None or parent_seg is None:
+        interface.local_partition_success = False
+        interface.local_partition_mode = "missing_segments"
+        return {"success": False, "blocked_edges": set(), "patch_cells": []}
+
+    child_path = np.asarray(child_seg["path_points_oriented"], dtype=float)
+    parent_path = np.asarray(parent_seg["path_points_oriented"], dtype=float)
+    child_radii = child_seg.get("path_radii_oriented")
+    parent_radii = parent_seg.get("path_radii_oriented")
+    child_s0 = 0.0 if interface.representative_child_abscissa is None else float(interface.representative_child_abscissa)
+    parent_s0 = float(polyline_length(parent_path)) if interface.parent_projection_abscissa is None else float(interface.parent_projection_abscissa)
+    patch_radius = max(float(interface.patch_radius), 2.0 * max(float(interface.child_radius), float(interface.parent_radius), 1.0))
+    spacing = max(float(interface.local_spacing), 0.12)
+    confidence_scale = 0.75 if interface.low_confidence or interface.synthetic else 1.0
+    effective_patch_radius = patch_radius * confidence_scale
+    barrier_band = max(0.50 * spacing, 0.22 * effective_patch_radius, 0.24 * max(float(interface.child_radius), float(interface.parent_radius), 1.0))
+    patch_cells: List[int] = []
+    metrics: Dict[int, Dict[str, float]] = {}
+
+    for ci, center in enumerate(np.asarray(centers, dtype=float)):
+        child_proj = distance_to_prepared_polyline(center, child_seg["projection"])
+        parent_proj = distance_to_prepared_polyline(center, parent_seg["projection"])
+        child_radius = path_radius_at_abscissa(child_path, child_radii, float(child_proj["abscissa"]), float(interface.child_radius or child_seg.get("mean_radius", 1.0)))
+        parent_radius = path_radius_at_abscissa(parent_path, parent_radii, float(parent_proj["abscissa"]), float(interface.parent_radius or parent_seg.get("mean_radius", 1.0)))
+        child_dist = math.sqrt(max(float(child_proj["distance2"]), 0.0))
+        parent_dist = math.sqrt(max(float(parent_proj["distance2"]), 0.0))
+        signed = point_plane_signed_distance(center, interface.contour_centroid, interface.partition_normal)
+        near_child = (
+            float(child_proj["abscissa"]) >= child_s0 - 0.75 * spacing
+            and float(child_proj["abscissa"]) <= child_s0 + float(interface.child_window) + spacing
+            and child_dist <= max(3.25 * child_radius, effective_patch_radius)
+        )
+        near_parent = (
+            float(parent_proj["abscissa"]) >= parent_s0 - float(interface.parent_window) - spacing
+            and float(parent_proj["abscissa"]) <= parent_s0 + 0.75 * spacing
+            and parent_dist <= max(3.25 * parent_radius, effective_patch_radius)
+        )
+        near_contour = float(np.linalg.norm(center - np.asarray(interface.contour_centroid, dtype=float))) <= 1.20 * effective_patch_radius
+        if not (near_child or near_parent or near_contour):
+            continue
+        child_rel = child_dist / max(child_radius, 1.0)
+        parent_rel = parent_dist / max(parent_radius, 1.0)
+        contour_dist = point_to_polyline_distance(center, interface.contour_points, closed=True)
+        patch_cells.append(int(ci))
+        metrics[int(ci)] = {
+            "signed": float(signed),
+            "child_rel": float(child_rel),
+            "parent_rel": float(parent_rel),
+            "child_abscissa": float(child_proj["abscissa"]),
+            "parent_abscissa": float(parent_proj["abscissa"]),
+            "contour_dist": float(contour_dist),
+            "child_radius": float(child_radius),
+            "parent_radius": float(parent_radius),
+        }
+
+    patch_set = set(int(v) for v in patch_cells)
+    if not patch_set:
+        interface.local_partition_success = False
+        interface.local_partition_mode = "empty_patch"
+        return {"success": False, "blocked_edges": set(), "patch_cells": []}
+
+    barrier_cells: Set[int] = set()
+    patch_center_ids = sorted(patch_set)
+    patch_centers = np.asarray([centers[idx] for idx in patch_center_ids], dtype=float)
+    for contour_point in np.asarray(interface.contour_points, dtype=float):
+        if patch_centers.shape[0] == 0:
+            break
+        d2 = np.sum((patch_centers - contour_point.reshape(1, 3)) ** 2, axis=1)
+        nearest_patch_idx = int(np.argmin(d2))
+        barrier_cells.add(int(patch_center_ids[nearest_patch_idx]))
+    for ci in patch_set:
+        m = metrics[int(ci)]
+        if float(m["contour_dist"]) <= barrier_band and abs(float(m["signed"])) <= max(1.20 * barrier_band, 0.35 * effective_patch_radius):
+            barrier_cells.add(int(ci))
+
+    child_seed_offset = max(0.35 * float(interface.child_radius or child_seg.get("mean_radius", 1.0)), 0.80 * barrier_band)
+    parent_seed_offset = max(0.35 * float(interface.parent_radius or parent_seg.get("mean_radius", 1.0)), 0.80 * barrier_band)
+    child_seeds: Set[int] = set()
+    parent_seeds: Set[int] = set()
+    child_allowed: Set[int] = set()
+    parent_allowed: Set[int] = set()
+    child_costs: Dict[int, float] = {}
+    parent_costs: Dict[int, float] = {}
+
+    for ci in patch_set:
+        if ci in barrier_cells:
+            continue
+        m = metrics[int(ci)]
+        child_range_pen = abs(float(m["child_abscissa"]) - child_s0) / max(float(interface.child_window) + spacing, spacing)
+        parent_range_pen = abs(float(m["parent_abscissa"]) - parent_s0) / max(float(interface.parent_window) + spacing, spacing)
+        child_cost = float(m["child_rel"]) + 0.70 * clamp(-float(m["signed"]) / max(float(m["child_radius"]), 1.0), 0.0, 2.0) + 0.25 * child_range_pen
+        parent_cost = float(m["parent_rel"]) + 0.70 * clamp(float(m["signed"]) / max(float(m["parent_radius"]), 1.0), 0.0, 2.0) + 0.25 * parent_range_pen
+        child_costs[int(ci)] = float(child_cost)
+        parent_costs[int(ci)] = float(parent_cost)
+        child_allowed_here = (
+            float(m["child_abscissa"]) >= child_s0 - 0.75 * spacing
+            and float(m["child_abscissa"]) <= child_s0 + float(interface.child_window) + spacing
+            and child_cost <= parent_cost + 0.60
+            and float(m["signed"]) >= -0.55 * max(float(m["child_radius"]), 1.0)
+        )
+        parent_allowed_here = (
+            float(m["parent_abscissa"]) >= parent_s0 - float(interface.parent_window) - spacing
+            and float(m["parent_abscissa"]) <= parent_s0 + 0.75 * spacing
+            and parent_cost <= child_cost + 0.60
+            and float(m["signed"]) <= 0.55 * max(float(m["parent_radius"]), 1.0)
+        )
+        if child_allowed_here:
+            child_allowed.add(int(ci))
+        if parent_allowed_here:
+            parent_allowed.add(int(ci))
+        if child_allowed_here and float(m["signed"]) >= child_seed_offset and float(m["child_rel"]) <= min(1.85, float(m["parent_rel"]) + 0.20):
+            child_seeds.add(int(ci))
+        if parent_allowed_here and float(m["signed"]) <= -parent_seed_offset and float(m["parent_rel"]) <= min(1.85, float(m["child_rel"]) + 0.20):
+            parent_seeds.add(int(ci))
+
+    if not child_seeds and child_costs:
+        candidate = min((ci for ci in child_allowed), key=lambda ci: (child_costs[ci], parent_costs.get(ci, float("inf"))), default=None)
+        if candidate is not None:
+            child_seeds.add(int(candidate))
+    if not parent_seeds and parent_costs:
+        candidate = min((ci for ci in parent_allowed), key=lambda ci: (parent_costs[ci], child_costs.get(ci, float("inf"))), default=None)
+        if candidate is not None:
+            parent_seeds.add(int(candidate))
+
+    if (interface.low_confidence or interface.synthetic) and (len(child_seeds) < 1 or len(parent_seeds) < 1):
+        interface.local_partition_success = False
+        interface.local_partition_mode = "conservative_skip"
+        interface.local_patch_cell_ids = sorted(int(v) for v in patch_set)
+        interface.local_barrier_cell_ids = sorted(int(v) for v in barrier_cells)
+        return {"success": False, "blocked_edges": set(), "patch_cells": sorted(int(v) for v in patch_set)}
+
+    child_reached = flood_reachable_cells(child_seeds, child_allowed, adjacency)
+    parent_reached = flood_reachable_cells(parent_seeds, parent_allowed, adjacency)
+    local_labels: Dict[int, int] = {}
+    child_cells: Set[int] = set()
+    parent_cells: Set[int] = set()
+
+    for ci in sorted(patch_set):
+        if ci in child_reached and ci not in parent_reached:
+            local_labels[int(ci)] = int(interface.child_segment_id)
+            child_cells.add(int(ci))
+        elif ci in parent_reached and ci not in child_reached:
+            local_labels[int(ci)] = int(interface.parent_segment_id)
+            parent_cells.add(int(ci))
+        elif ci in child_reached and ci in parent_reached:
+            if child_costs.get(int(ci), float("inf")) <= parent_costs.get(int(ci), float("inf")):
+                local_labels[int(ci)] = int(interface.child_segment_id)
+                child_cells.add(int(ci))
+            else:
+                local_labels[int(ci)] = int(interface.parent_segment_id)
+                parent_cells.add(int(ci))
+        elif ci in barrier_cells:
+            if float(metrics[int(ci)]["signed"]) >= 0.0:
+                local_labels[int(ci)] = int(interface.child_segment_id)
+                child_cells.add(int(ci))
+            else:
+                local_labels[int(ci)] = int(interface.parent_segment_id)
+                parent_cells.add(int(ci))
+        else:
+            child_cost = child_costs.get(int(ci), float("inf"))
+            parent_cost = parent_costs.get(int(ci), float("inf"))
+            if child_cost <= parent_cost:
+                local_labels[int(ci)] = int(interface.child_segment_id)
+                child_cells.add(int(ci))
+            elif parent_cost < float("inf"):
+                local_labels[int(ci)] = int(interface.parent_segment_id)
+                parent_cells.add(int(ci))
+
+    blocked_edges: Set[Tuple[int, int]] = set()
+    for ci in patch_set:
+        for nei in adjacency[int(ci)]:
+            nei = int(nei)
+            if nei not in patch_set:
+                continue
+            li = local_labels.get(int(ci), -1)
+            lj = local_labels.get(int(nei), -1)
+            if li >= 0 and lj >= 0 and li != lj:
+                a, b = (int(ci), int(nei)) if int(ci) < int(nei) else (int(nei), int(ci))
+                blocked_edges.add((a, b))
+
+    interface.local_partition_success = bool(child_cells and parent_cells)
+    interface.local_partition_mode = "contour_barrier_region_grow" if interface.local_partition_success else "weak_partition"
+    interface.local_patch_cell_ids = sorted(int(v) for v in patch_set)
+    interface.local_barrier_cell_ids = sorted(int(v) for v in barrier_cells)
+    interface.local_child_cell_ids = sorted(int(v) for v in child_cells)
+    interface.local_parent_cell_ids = sorted(int(v) for v in parent_cells)
+    interface.local_child_seed_cell_ids = sorted(int(v) for v in child_seeds)
+    interface.local_parent_seed_cell_ids = sorted(int(v) for v in parent_seeds)
+    return {
+        "success": bool(interface.local_partition_success),
+        "local_labels": local_labels,
+        "blocked_edges": blocked_edges,
+        "patch_cells": sorted(int(v) for v in patch_set),
+        "barrier_cells": sorted(int(v) for v in barrier_cells),
+    }
+
+
+def seed_segment_core_cells(
+    centers: np.ndarray,
+    locator: "vtkStaticPointLocator",
+    labels: np.ndarray,
+    interface_patch_mask: np.ndarray,
+    segments: List[Dict[str, Any]],
+) -> List[Tuple[int, int]]:
+    id_list = vtk.vtkIdList()
+    candidates: Dict[int, Tuple[float, int]] = {}
+    for seg in segments:
+        pts = np.asarray(seg["path_points_oriented"], dtype=float)
+        total = float(seg["length"])
+        if pts.shape[0] < 2 or total <= EPS:
+            continue
+        radius = max(float(seg.get("mean_radius", 1.0)), 1.0)
+        start_s = 0.10 * total if total <= 4.0 * radius else 0.18 * total
+        end_s = 0.90 * total if total <= 4.0 * radius else 0.82 * total
+        sample_count = max(4, min(14, int(math.ceil(total / max(radius, 0.5))) + 1))
+        samples_s = [float(start_s + (end_s - start_s) * k / float(max(sample_count - 1, 1))) for k in range(sample_count)]
+        for s in samples_s:
+            p = polyline_point_at_abscissa(pts, s)
+            id_list.Reset()
+            locator.FindClosestNPoints(8, float(p[0]), float(p[1]), float(p[2]), id_list)
+            for k in range(id_list.GetNumberOfIds()):
+                ci = int(id_list.GetId(k))
+                if ci < 0 or ci >= labels.shape[0] or labels[ci] >= 0 or bool(interface_patch_mask[ci]):
+                    continue
+                rel, abscissa, local_radius = segment_relative_distance(centers[ci], seg)
+                inside, violation = point_between_segment_boundaries(centers[ci], seg)
+                if (not inside) or float(violation) > 0.25 or float(rel) > 1.65:
+                    continue
+                abscissa_penalty = abs(float(abscissa) - s) / max(0.35 * total, local_radius, 1.0)
+                score = float(rel + 0.20 * abscissa_penalty)
+                prev = candidates.get(int(ci))
+                if prev is None or score < float(prev[0]):
+                    candidates[int(ci)] = (float(score), int(seg["segment_id"]))
+    selected = [(int(ci), int(seg_id)) for ci, (score, seg_id) in sorted(candidates.items(), key=lambda item: (float(item[1][0]), int(item[1][1]), int(item[0])))]
+    return selected
+
+
+def propagate_segment_labels(
+    centers: np.ndarray,
+    adjacency: List[List[int]],
+    labels: np.ndarray,
+    assignment_modes: np.ndarray,
+    blocked_edges: Set[Tuple[int, int]],
+    segment_lookup: Dict[int, Dict[str, Any]],
+) -> np.ndarray:
+    n_cells = int(labels.shape[0])
+    best_cost = np.full((n_cells,), np.inf, dtype=float)
+    best_label = np.asarray(labels, dtype=np.int32).copy()
+    frozen = (assignment_modes > 0) & (assignment_modes < 3) & (labels >= 0)
+    pq: List[Tuple[float, int, int]] = []
+    for ci in range(n_cells):
+        seg_id = int(labels[ci])
+        if seg_id < 0:
+            continue
+        best_cost[ci] = 0.0
+        heapq.heappush(pq, (0.0, int(ci), int(seg_id)))
+
+    while pq:
+        cost, ci, seg_id = heapq.heappop(pq)
+        if cost > float(best_cost[ci]) + 1e-12 or int(best_label[ci]) != int(seg_id):
+            continue
+        seg = segment_lookup.get(int(seg_id))
+        if seg is None:
+            continue
+        for nei in adjacency[int(ci)]:
+            nei = int(nei)
+            edge = (ci, nei) if ci < nei else (nei, ci)
+            if edge in blocked_edges:
+                continue
+            if frozen[nei] and int(best_label[nei]) != int(seg_id):
+                continue
+            proj = distance_to_prepared_polyline(centers[nei], seg["projection"])
+            radius = max(float(proj["radius"]), float(seg.get("mean_radius", 1.0)), 1.0)
+            inside, violation = point_between_segment_boundaries(centers[nei], seg)
+            step = float(np.linalg.norm(centers[nei] - centers[ci]) / radius)
+            boundary_penalty = 0.0 if inside else 0.40 + 0.95 * float(violation)
+            new_cost = float(cost + step + boundary_penalty)
+            if new_cost + 1e-9 < float(best_cost[nei]):
+                best_cost[nei] = float(new_cost)
+                best_label[nei] = int(seg_id)
+                heapq.heappush(pq, (float(new_cost), int(nei), int(seg_id)))
+                if not frozen[nei]:
+                    assignment_modes[nei] = max(int(assignment_modes[nei]), 3)
+    return best_label.astype(np.int32)
 
 
 def build_segment_sample_locator(segments: List[Dict[str, Any]], sample_step: float) -> Tuple["vtkStaticPointLocator", Dict[int, int]]:
@@ -3172,24 +3984,94 @@ def choose_segment_for_point(
 def assign_surface_cells_to_segments(
     surface: "vtkPolyData",
     segments: List[Dict[str, Any]],
+    transition_interfaces: List[TransitionInterface],
     resampling_step: float,
     warnings: List[str],
-) -> Tuple[np.ndarray, Dict[int, int], int]:
+) -> Tuple[np.ndarray, Dict[int, int], int, Dict[str, np.ndarray]]:
     centers = build_cell_centers(surface)
     if centers.shape[0] != surface.GetNumberOfCells():
         raise RuntimeError("Failed to compute surface cell centers.")
 
-    sample_step = max(0.60 * float(resampling_step), 0.35)
-    locator, sample_segment_map = build_segment_sample_locator(segments, sample_step=sample_step)
+    adjacency = build_surface_cell_adjacency(surface)
     segment_lookup = {int(seg["segment_id"]): seg for seg in segments}
-
     labels = np.full((surface.GetNumberOfCells(),), -1, dtype=np.int32)
+    assignment_modes = np.zeros((surface.GetNumberOfCells(),), dtype=np.int32)
+    interface_ids = np.full((surface.GetNumberOfCells(),), -1, dtype=np.int32)
+    barrier_mask = np.zeros((surface.GetNumberOfCells(),), dtype=np.int32)
+    interface_patch_mask = np.zeros((surface.GetNumberOfCells(),), dtype=np.int32)
+    owner_strength = np.zeros((surface.GetNumberOfCells(),), dtype=float)
+    blocked_edges: Set[Tuple[int, int]] = set()
+
     fallback_counts: Dict[int, int] = {int(seg["segment_id"]): 0 for seg in segments}
     total_fallback = 0
+    local_interfaces_used = 0
+
+    for order, interface in enumerate(
+        sorted(
+            transition_interfaces,
+            key=lambda item: (
+                float(item.confidence),
+                float(item.connection_zone_score),
+                0 if not item.low_confidence else -1,
+            ),
+            reverse=True,
+        ),
+        start=1,
+    ):
+        interface.interface_id = int(order)
+        result = partition_transition_interface_on_surface(centers, adjacency, interface, segment_lookup)
+        for ci in result.get("patch_cells", []):
+            interface_patch_mask[int(ci)] = 1
+        for ci in result.get("barrier_cells", []):
+            barrier_mask[int(ci)] = 1
+            if interface_ids[int(ci)] < 0:
+                interface_ids[int(ci)] = int(interface.interface_id)
+        if not bool(result.get("success", False)):
+            warnings.extend([w for w in interface.warnings if w not in warnings])
+            continue
+        local_interfaces_used += 1
+        for edge in result.get("blocked_edges", set()):
+            blocked_edges.add((int(edge[0]), int(edge[1])))
+        for ci, seg_id in result.get("local_labels", {}).items():
+            if int(seg_id) < 0:
+                continue
+            if assignment_modes[int(ci)] == 1 and owner_strength[int(ci)] > float(interface.confidence) + 1e-9:
+                continue
+            labels[int(ci)] = int(seg_id)
+            assignment_modes[int(ci)] = 1
+            interface_ids[int(ci)] = int(interface.interface_id)
+            owner_strength[int(ci)] = float(interface.confidence)
+
+    local_partition_labels = labels.copy()
+    if not transition_interfaces:
+        warnings.append("W_INTERFACE_PARTITION_NONE: no parent-child transition interfaces were available; final labeling will rely more heavily on propagation and fallback.")
+    elif local_interfaces_used == 0:
+        warnings.append("W_INTERFACE_PARTITION_UNUSED: no transition interface produced a trusted local partition; fallback pressure may remain elevated.")
+
+    center_locator = build_cell_center_locator(centers)
+    core_seeds = seed_segment_core_cells(centers, center_locator, labels, interface_patch_mask, segments)
+    for ci, seg_id in core_seeds:
+        if labels[int(ci)] >= 0:
+            continue
+        labels[int(ci)] = int(seg_id)
+        assignment_modes[int(ci)] = 2
+
+    labels = propagate_segment_labels(
+        centers=centers,
+        adjacency=adjacency,
+        labels=labels,
+        assignment_modes=assignment_modes,
+        blocked_edges=blocked_edges,
+        segment_lookup=segment_lookup,
+    )
+
+    sample_step = max(0.60 * float(resampling_step), 0.35)
+    locator, sample_segment_map = build_segment_sample_locator(segments, sample_step=sample_step)
     id_list = vtk.vtkIdList()
     n_samples = max(8, min(32, len(sample_segment_map)))
-
     for ci, center in enumerate(centers):
+        if labels[int(ci)] >= 0:
+            continue
         id_list.Reset()
         locator.FindClosestNPoints(int(n_samples), float(center[0]), float(center[1]), float(center[2]), id_list)
         candidate_segment_ids: List[int] = []
@@ -3205,6 +4087,7 @@ def assign_surface_cells_to_segments(
             candidate_segment_ids = [int(seg["segment_id"]) for seg in segments]
         chosen_seg, used_fallback = choose_segment_for_point(center, candidate_segment_ids, segment_lookup)
         labels[int(ci)] = int(chosen_seg)
+        assignment_modes[int(ci)] = 4
         if used_fallback:
             total_fallback += 1
             fallback_counts[int(chosen_seg)] = fallback_counts.get(int(chosen_seg), 0) + 1
@@ -3214,15 +4097,25 @@ def assign_surface_cells_to_segments(
         warnings.append(f"W_CELL_ASSIGNMENT_UNASSIGNED: {unassigned} cells remained unassigned after main pass.")
         for idx in np.flatnonzero(labels < 0).tolist():
             labels[int(idx)] = int(segments[0]["segment_id"])
+            assignment_modes[int(idx)] = 4
+            total_fallback += 1
+            fallback_counts[int(segments[0]["segment_id"])] = fallback_counts.get(int(segments[0]["segment_id"]), 0) + 1
 
     if total_fallback > 0:
         warnings.append(
-            f"W_CELL_ASSIGNMENT_FALLBACK: {total_fallback} / {surface.GetNumberOfCells()} cells required low-confidence assignment outside strict refined boundary gates."
+            f"W_CELL_ASSIGNMENT_FALLBACK: {total_fallback} / {surface.GetNumberOfCells()} cells required low-confidence global recovery after local interface partitioning and propagation."
         )
-    return labels.astype(np.int32), fallback_counts, int(total_fallback)
+    debug_arrays = {
+        "AssignmentMode": assignment_modes.astype(np.int32),
+        "TransitionInterfaceId": interface_ids.astype(np.int32),
+        "InterfaceBarrier": barrier_mask.astype(np.int32),
+        "InterfacePatchMask": interface_patch_mask.astype(np.int32),
+        "LocalPartitionSegmentId": local_partition_labels.astype(np.int32),
+    }
+    return labels.astype(np.int32), fallback_counts, int(total_fallback), debug_arrays
 
 
-def add_segment_arrays_to_surface(surface: "vtkPolyData", labels: np.ndarray) -> "vtkPolyData":
+def add_segment_arrays_to_surface(surface: "vtkPolyData", labels: np.ndarray, extra_arrays: Optional[Dict[str, np.ndarray]] = None) -> "vtkPolyData":
     out = vtk.vtkPolyData()
     out.DeepCopy(surface)
 
@@ -3243,6 +4136,16 @@ def add_segment_arrays_to_surface(surface: "vtkPolyData", labels: np.ndarray) ->
     color_arr.SetName("SegmentColorRGB")
     color_arr.SetNumberOfComponents(3)
     out.GetCellData().AddArray(color_arr)
+    for name, values in sorted((extra_arrays or {}).items(), key=lambda item: str(item[0])):
+        arr_np = np.asarray(values)
+        if arr_np.shape[0] != labels.shape[0]:
+            continue
+        if np.issubdtype(arr_np.dtype, np.integer):
+            arr = numpy_to_vtk(arr_np.astype(np.int32), deep=True, array_type=vtk.VTK_INT)
+        else:
+            arr = numpy_to_vtk(arr_np.astype(float), deep=True, array_type=vtk.VTK_DOUBLE)
+        arr.SetName(str(name))
+        out.GetCellData().AddArray(arr)
     out.GetCellData().SetScalars(color_arr)
     return out
 
@@ -3257,6 +4160,113 @@ def np3_to_list(arr: Optional[np.ndarray]) -> Optional[List[float]]:
 def points_to_lists(points: np.ndarray) -> List[List[float]]:
     pts = np.asarray(points, dtype=float)
     return [[float(p[0]), float(p[1]), float(p[2])] for p in pts]
+
+
+def merge_graph_induced_root_pseudosegments(
+    segments: List[Dict[str, Any]],
+    transition_interfaces: List[TransitionInterface],
+    warnings: List[str],
+    resampling_step: float,
+) -> Tuple[List[Dict[str, Any]], List[TransitionInterface]]:
+    segs = [dict(seg) for seg in segments]
+    interfaces = list(transition_interfaces)
+    changed = True
+    while changed:
+        changed = False
+        lookup = {int(seg["segment_id"]): seg for seg in segs}
+        root_candidates = [seg for seg in segs if seg.get("parent_segment_id") is None and len(seg.get("child_segment_ids", [])) == 1]
+        for root_seg in sorted(root_candidates, key=lambda item: int(item["segment_id"])):
+            child_id = int(root_seg["child_segment_ids"][0])
+            child_seg = lookup.get(int(child_id))
+            if child_seg is None:
+                continue
+            root_len = float(root_seg.get("length", 0.0))
+            root_radius = max(float(root_seg.get("mean_radius", 1.0)), 1.0)
+            tangent_parent = polyline_tangent_at_abscissa(np.asarray(root_seg["path_points_oriented"], dtype=float), max(root_len - 0.5 * max(root_radius, 1.0), 0.0))
+            tangent_child = polyline_tangent_at_abscissa(np.asarray(child_seg["path_points_oriented"], dtype=float), min(0.5 * max(root_radius, 1.0), float(child_seg.get("length", 0.0))))
+            tangent_align = abs(float(np.dot(unit(tangent_parent), unit(tangent_child))))
+            interface = next((iface for iface in interfaces if int(iface.parent_segment_id) == int(root_seg["segment_id"]) and int(iface.child_segment_id) == int(child_id)), None)
+            prox_boundary = child_seg.get("proximal_boundary")
+            interface_conf = float(interface.confidence) if interface is not None else float(prox_boundary.confidence if prox_boundary is not None else 0.0)
+            interface_supported = bool(interface is not None and (not interface.low_confidence) and (not interface.synthetic) and float(interface.confidence) >= 0.55)
+            short_threshold = max(2.4 * root_radius, 4.0 * float(resampling_step))
+            if root_len > short_threshold or tangent_align < 0.82 or interface_supported:
+                continue
+            root_seg["path_points_oriented"] = concatenate_segment_paths(np.asarray(root_seg["path_points_oriented"], dtype=float), np.asarray(child_seg["path_points_oriented"], dtype=float))
+            root_seg["path_radii_oriented"] = concatenate_segment_radii(root_seg.get("path_radii_oriented"), child_seg.get("path_radii_oriented"))
+            root_seg["node_path_oriented"] = list(root_seg["node_path_oriented"]) + list(child_seg["node_path_oriented"][1:] if len(child_seg["node_path_oriented"]) > 1 else child_seg["node_path_oriented"])
+            root_seg["supernode_distal"] = int(child_seg["supernode_distal"])
+            root_seg["child_segment_ids"] = [int(v) for v in child_seg.get("child_segment_ids", [])]
+            root_seg["length"] = float(polyline_length(np.asarray(root_seg["path_points_oriented"], dtype=float)))
+            root_seg["warnings"] = list(root_seg.get("warnings", [])) + list(child_seg.get("warnings", []))
+            root_seg.setdefault("merged_segment_ids", []).append(int(child_id))
+            if "distal_boundary" in child_seg:
+                root_seg["distal_boundary"] = child_seg["distal_boundary"]
+            for grandchild_id in child_seg.get("child_segment_ids", []):
+                grandchild = lookup.get(int(grandchild_id))
+                if grandchild is not None:
+                    grandchild["parent_segment_id"] = int(root_seg["segment_id"])
+            for iface in interfaces:
+                if int(iface.parent_segment_id) == int(child_id):
+                    iface.parent_segment_id = int(root_seg["segment_id"])
+                if int(iface.child_segment_id) == int(child_id) and int(iface.parent_segment_id) == int(root_seg["segment_id"]):
+                    iface.low_confidence = True
+            interfaces = [
+                iface
+                for iface in interfaces
+                if not (int(iface.parent_segment_id) == int(root_seg["segment_id"]) and int(iface.child_segment_id) == int(child_id))
+            ]
+            segs = [seg for seg in segs if int(seg["segment_id"]) != int(child_id)]
+            warnings.append(
+                f"W_ROOT_PSEUDOSEGMENT_MERGED: merged short proximal segment {int(root_seg['segment_id'])} with child {int(child_id)} because the graph split was not supported by a strong surface-defined transition (confidence={interface_conf:.3f})."
+            )
+            changed = True
+            break
+    lookup = {int(seg["segment_id"]): seg for seg in segs}
+    for seg in segs:
+        seg["child_segment_ids"] = sorted(int(v) for v in seg.get("child_segment_ids", []) if int(v) in lookup)
+    return segs, interfaces
+
+
+def transition_interface_to_json(interface: TransitionInterface) -> Dict[str, Any]:
+    return {
+        "interface_id": int(interface.interface_id),
+        "child_segment_id": int(interface.child_segment_id),
+        "parent_segment_id": int(interface.parent_segment_id),
+        "contour_points": points_to_lists(interface.contour_points),
+        "contour_centroid": np3_to_list(interface.contour_centroid),
+        "contour_normal": np3_to_list(interface.contour_normal),
+        "parent_projection_point": np3_to_list(interface.parent_projection_point),
+        "parent_projection_abscissa": (None if interface.parent_projection_abscissa is None else float(interface.parent_projection_abscissa)),
+        "partition_normal": np3_to_list(interface.partition_normal),
+        "partition_axis_u": np3_to_list(interface.partition_axis_u),
+        "partition_axis_v": np3_to_list(interface.partition_axis_v),
+        "confidence": float(interface.confidence),
+        "connection_zone_score": float(interface.connection_zone_score),
+        "method_tag": str(interface.method_tag),
+        "representative_child_abscissa": (None if interface.representative_child_abscissa is None else float(interface.representative_child_abscissa)),
+        "stable_zone_start_abscissa": (None if interface.stable_zone_start_abscissa is None else float(interface.stable_zone_start_abscissa)),
+        "stable_zone_end_abscissa": (None if interface.stable_zone_end_abscissa is None else float(interface.stable_zone_end_abscissa)),
+        "stable_zone_indices": [int(interface.stable_zone_start_index), int(interface.stable_zone_end_index)],
+        "representative_index": int(interface.representative_index),
+        "local_spacing": float(interface.local_spacing),
+        "child_window": float(interface.child_window),
+        "parent_window": float(interface.parent_window),
+        "patch_radius": float(interface.patch_radius),
+        "child_radius": float(interface.child_radius),
+        "parent_radius": float(interface.parent_radius),
+        "contour_quality": float(interface.contour_quality),
+        "axis_stability": float(interface.axis_stability),
+        "synthetic": bool(interface.synthetic),
+        "low_confidence": bool(interface.low_confidence),
+        "local_partition_success": bool(interface.local_partition_success),
+        "local_partition_mode": str(interface.local_partition_mode),
+        "local_patch_cell_count": int(len(interface.local_patch_cell_ids)),
+        "local_barrier_cell_count": int(len(interface.local_barrier_cell_ids)),
+        "local_child_cell_count": int(len(interface.local_child_cell_ids)),
+        "local_parent_cell_count": int(len(interface.local_parent_cell_ids)),
+        "warnings": list(interface.warnings),
+    }
 
 
 def segment_confidence(segment: Dict[str, Any], total_cells: int) -> float:
@@ -3283,15 +4293,19 @@ def build_metadata(
     output_surface_path: str,
     output_metadata_path: str,
     segments: List[Dict[str, Any]],
+    transition_interfaces: List[TransitionInterface],
     warnings: List[str],
     termination_mode: str,
     centerline_info: Dict[str, Any],
     total_cells: int,
+    assignment_mode_counts: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
+    interface_lookup = {int(iface.interface_id): iface for iface in transition_interfaces}
     segments_json: List[Dict[str, Any]] = []
     for seg in sorted(segments, key=lambda item: int(item["segment_id"])):
         prox = seg["proximal_boundary"]
         dist = seg["distal_boundary"]
+        prox_interface = interface_lookup.get(int(seg.get("proximal_transition_interface_id", -1)))
         segments_json.append(
             {
                 "segment_id": int(seg["segment_id"]),
@@ -3316,9 +4330,28 @@ def build_metadata(
                 "connection_zone_score": float(prox.connection_zone_score),
                 "parent_projection_point": np3_to_list(prox.parent_projection_point),
                 "parent_projection_abscissa": (None if prox.parent_projection_abscissa is None else float(prox.parent_projection_abscissa)),
+                "boundary_confidence": {
+                    "proximal": float(prox.confidence),
+                    "distal": float(dist.confidence),
+                },
                 "boundary_is_synthetic": {
                     "proximal": bool(prox.synthetic),
                     "distal": bool(dist.synthetic),
+                },
+                "boundary_confidence_flags": {
+                    "proximal_fallback_used": bool(prox.fallback_used),
+                    "distal_fallback_used": bool(dist.fallback_used),
+                },
+                "interface_method_tag": (str(prox_interface.method_tag) if prox_interface is not None else str(prox.boundary_method)),
+                "boundary_confidence_detail": {
+                    "proximal_boundary_confidence": float(prox.confidence),
+                    "distal_boundary_confidence": float(dist.confidence),
+                    "connection_zone_score": float(prox.connection_zone_score),
+                },
+                "local_partition": {
+                    "interface_id": (None if prox_interface is None else int(prox_interface.interface_id)),
+                    "success": bool(prox_interface.local_partition_success) if prox_interface is not None else False,
+                    "mode": (str(prox_interface.local_partition_mode) if prox_interface is not None else "not_applicable"),
                 },
                 "fallback_flags": {
                     "proximal_boundary_fallback": bool(prox.fallback_used),
@@ -3327,6 +4360,8 @@ def build_metadata(
                 },
                 "length": float(seg["length"]),
                 "mean_radius": float(seg.get("mean_radius", 0.0)),
+                "child_coupled_parent_interface_ids": [int(v) for v in seg.get("child_transition_interface_ids", [])],
+                "merged_segment_ids": [int(v) for v in seg.get("merged_segment_ids", [])],
             }
         )
 
@@ -3338,6 +4373,8 @@ def build_metadata(
         "centerline_info": centerline_info,
         "segment_count": int(len(segments)),
         "segments": segments_json,
+        "transition_interfaces": [transition_interface_to_json(iface) for iface in sorted(transition_interfaces, key=lambda item: int(item.interface_id))],
+        "cell_assignment_mode_counts": dict(assignment_mode_counts or {}),
         "warnings": list(warnings),
     }
 
@@ -3468,16 +4505,21 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
     for term_idx, supernode_id in term_supernode_map.items():
         supernode_to_term[int(supernode_id)] = terms[int(term_idx)]
 
-    boundary_debug_records: List[Dict[str, Any]] = []
     section_debug_records: List[Dict[str, Any]] = []
-    parent_junction_infos: Dict[int, List[Dict[str, Any]]] = {}
+    transition_interfaces: List[TransitionInterface] = []
 
     for seg in ordered_segments:
         path_points = np.asarray(seg["path_points_oriented"], dtype=float)
         path_radii = seg["path_radii_oriented"]
         mean_radius = max(float(np.nanmedian(path_radii)) if path_radii is not None and np.asarray(path_radii).size > 0 else max(float(seg["length"]) * 0.05, 1.0), 1.0)
         seg["mean_radius"] = float(mean_radius)
+        seg["merged_segment_ids"] = []
+        seg["child_transition_interface_ids"] = []
+        seg["proximal_transition_interface_id"] = -1
 
+    segment_lookup = {int(seg["segment_id"]): seg for seg in ordered_segments}
+    for seg in ordered_segments:
+        path_points = np.asarray(seg["path_points_oriented"], dtype=float)
         start_inward = unit(path_points[1] - path_points[0]) if path_points.shape[0] >= 2 else np.array([0.0, 0.0, 1.0], dtype=float)
         end_inward = unit(path_points[-2] - path_points[-1]) if path_points.shape[0] >= 2 else -start_inward
 
@@ -3490,74 +4532,68 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 prox_term,
                 fallback_center=path_points[0],
                 inward_direction=start_inward,
-                fallback_radius=mean_radius,
+                fallback_radius=float(seg["mean_radius"]),
                 label=f"segment_{seg['segment_id']}_proximal",
             )
         else:
             parent_seg = segment_lookup[int(seg["parent_segment_id"])]
-            proximal_boundary, parent_info, child_debug = refine_child_proximal_boundary(
+            proximal_boundary, parent_info, child_debug, transition_interface = refine_child_proximal_boundary(
                 surface=surface_clean,
                 parent_seg=parent_seg,
                 child_seg=seg,
                 resampling_step=float(centerline_info["resampling_step"]),
                 warnings=warnings,
             )
-            parent_junction_infos.setdefault(int(seg["parent_segment_id"]), []).append(
-                {
-                    **parent_info,
-                    "child_segment_id": int(seg["segment_id"]),
-                    "child_boundary": proximal_boundary,
-                }
-            )
+            if transition_interface is not None:
+                transition_interfaces.append(transition_interface)
             section_debug_records.extend(child_debug)
+            _ = parent_info
 
         seg["proximal_boundary"] = proximal_boundary
         seg["warnings"].extend(list(proximal_boundary.warnings))
-        seg["proximal_plane_tolerance"] = float(max(mean_radius * 0.40, 0.45 * float(centerline_info["resampling_step"]), 0.35))
-
-        boundary_debug_records.append(
-            {
-                "segment_id": int(seg["segment_id"]),
-                "boundary_side": 0,
-                "boundary_type": str(proximal_boundary.boundary_type),
-                "boundary_method": str(proximal_boundary.boundary_method),
-                "profile_points": np.asarray(proximal_boundary.profile_points, dtype=float),
-                "fallback_used": bool(proximal_boundary.fallback_used),
-                "confidence": float(proximal_boundary.confidence),
-            }
-        )
+        seg["proximal_plane_tolerance"] = float(max(float(seg["mean_radius"]) * 0.40, 0.45 * float(centerline_info["resampling_step"]), 0.35))
 
         if dist_supernode in supernode_to_term:
             distal_boundary = build_terminal_boundary_profile(
                 supernode_to_term.get(dist_supernode),
                 fallback_center=path_points[-1],
                 inward_direction=end_inward,
-                fallback_radius=mean_radius,
+                fallback_radius=float(seg["mean_radius"]),
                 label=f"segment_{seg['segment_id']}_distal",
             )
             seg["distal_boundary"] = distal_boundary
             seg["warnings"].extend(list(distal_boundary.warnings))
-            boundary_debug_records.append(
-                {
-                    "segment_id": int(seg["segment_id"]),
-                    "boundary_side": 1,
-                    "boundary_type": str(distal_boundary.boundary_type),
-                    "boundary_method": str(distal_boundary.boundary_method),
-                    "profile_points": np.asarray(distal_boundary.profile_points, dtype=float),
-                    "fallback_used": bool(distal_boundary.fallback_used),
-                    "confidence": float(distal_boundary.confidence),
-                }
-            )
+    ordered_segments, transition_interfaces = merge_graph_induced_root_pseudosegments(
+        ordered_segments,
+        transition_interfaces,
+        warnings=warnings,
+        resampling_step=float(centerline_info["resampling_step"]),
+    )
+    segment_lookup = {int(seg["segment_id"]): seg for seg in ordered_segments}
+    for seg in ordered_segments:
+        seg["child_segment_ids"] = []
+        path_points = np.asarray(seg["path_points_oriented"], dtype=float)
+        path_radii = seg.get("path_radii_oriented")
+        seg["length"] = float(polyline_length(path_points))
+        seg["mean_radius"] = max(float(np.nanmedian(path_radii)) if path_radii is not None and np.asarray(path_radii).size > 0 else max(float(seg["length"]) * 0.05, 1.0), 1.0)
+        seg["child_transition_interface_ids"] = []
+        seg["proximal_transition_interface_id"] = -1
+    for seg in ordered_segments:
+        parent_id = seg.get("parent_segment_id")
+        if parent_id is not None and int(parent_id) in segment_lookup:
+            segment_lookup[int(parent_id)]["child_segment_ids"].append(int(seg["segment_id"]))
+    for seg in ordered_segments:
+        seg["child_segment_ids"] = sorted(int(v) for v in seg.get("child_segment_ids", []))
 
     for seg in ordered_segments:
         if "distal_boundary" in seg:
             continue
-        child_infos = parent_junction_infos.get(int(seg["segment_id"]), [])
-        if child_infos:
+        child_ifaces = [iface for iface in transition_interfaces if int(iface.parent_segment_id) == int(seg["segment_id"])]
+        if child_ifaces:
             distal_boundary, parent_debug = build_parent_distal_boundary_from_children(
                 surface=surface_clean,
                 parent_seg=seg,
-                child_infos=child_infos,
+                child_interfaces=child_ifaces,
                 resampling_step=float(centerline_info["resampling_step"]),
                 warnings=warnings,
             )
@@ -3579,35 +4615,82 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
         seg["distal_boundary"] = distal_boundary
         seg["warnings"].extend(list(distal_boundary.warnings))
         seg["distal_plane_tolerance"] = float(max(float(seg.get("mean_radius", 1.0)) * 0.40, 0.45 * float(centerline_info["resampling_step"]), 0.35))
-        boundary_debug_records.append(
-            {
-                "segment_id": int(seg["segment_id"]),
-                "boundary_side": 1,
-                "boundary_type": str(distal_boundary.boundary_type),
-                "boundary_method": str(distal_boundary.boundary_method),
-                "profile_points": np.asarray(distal_boundary.profile_points, dtype=float),
-                "fallback_used": bool(distal_boundary.fallback_used),
-                "confidence": float(distal_boundary.confidence),
-            }
-        )
 
     for seg in ordered_segments:
         seg["projection"] = prepared_projection_data(np.asarray(seg["path_points_oriented"], dtype=float), seg["path_radii_oriented"])
 
+    transition_interfaces = [
+        iface
+        for iface in transition_interfaces
+        if int(iface.child_segment_id) in segment_lookup and int(iface.parent_segment_id) in segment_lookup
+    ]
+
     for seg in ordered_segments:
         seg["segment_confidence_cached"] = float(segment_confidence(seg, max(surface_clean.GetNumberOfCells(), 1)))
 
-    labels, fallback_counts, total_fallback = assign_surface_cells_to_segments(
+    labels, fallback_counts, total_fallback, surface_debug_arrays = assign_surface_cells_to_segments(
         surface=surface_clean,
         segments=ordered_segments,
+        transition_interfaces=transition_interfaces,
         resampling_step=float(centerline_info["resampling_step"]),
         warnings=warnings,
     )
+    for iface in transition_interfaces:
+        segment_lookup[int(iface.child_segment_id)]["proximal_transition_interface_id"] = int(iface.interface_id)
+        segment_lookup[int(iface.parent_segment_id)]["child_transition_interface_ids"].append(int(iface.interface_id))
+    for seg in ordered_segments:
+        seg["child_transition_interface_ids"] = sorted(set(int(v) for v in seg.get("child_transition_interface_ids", [])))
     for seg in ordered_segments:
         seg["fallback_cell_count"] = int(fallback_counts.get(int(seg["segment_id"]), 0))
         seg["segment_confidence_cached"] = float(segment_confidence(seg, int(surface_clean.GetNumberOfCells())))
 
-    surface_out = add_segment_arrays_to_surface(surface_clean, labels)
+    boundary_debug_records: List[Dict[str, Any]] = []
+    for seg in ordered_segments:
+        prox = seg["proximal_boundary"]
+        dist = seg["distal_boundary"]
+        boundary_debug_records.append(
+            {
+                "segment_id": int(seg["segment_id"]),
+                "boundary_side": 0,
+                "boundary_type": str(prox.boundary_type),
+                "boundary_method": str(prox.boundary_method),
+                "profile_points": np.asarray(prox.profile_points, dtype=float),
+                "fallback_used": bool(prox.fallback_used),
+                "confidence": float(prox.confidence),
+            }
+        )
+        boundary_debug_records.append(
+            {
+                "segment_id": int(seg["segment_id"]),
+                "boundary_side": 1,
+                "boundary_type": str(dist.boundary_type),
+                "boundary_method": str(dist.boundary_method),
+                "profile_points": np.asarray(dist.profile_points, dtype=float),
+                "fallback_used": bool(dist.fallback_used),
+                "confidence": float(dist.confidence),
+            }
+        )
+    for iface in transition_interfaces:
+        boundary_debug_records.append(
+            {
+                "segment_id": int(iface.child_segment_id),
+                "boundary_side": 2,
+                "boundary_type": "transition_interface",
+                "boundary_method": str(iface.method_tag),
+                "profile_points": np.asarray(iface.contour_points, dtype=float),
+                "fallback_used": bool(iface.low_confidence or iface.synthetic),
+                "confidence": float(iface.confidence),
+            }
+        )
+
+    assignment_mode_counts = {
+        "local_interface_partition": int(np.count_nonzero(surface_debug_arrays["AssignmentMode"] == 1)),
+        "segment_core_seed": int(np.count_nonzero(surface_debug_arrays["AssignmentMode"] == 2)),
+        "geodesic_propagation": int(np.count_nonzero(surface_debug_arrays["AssignmentMode"] == 3)),
+        "fallback_global_recovery": int(np.count_nonzero(surface_debug_arrays["AssignmentMode"] == 4)),
+    }
+
+    surface_out = add_segment_arrays_to_surface(surface_clean, labels, extra_arrays=surface_debug_arrays)
     write_vtp(surface_out, args.output_vtp)
 
     if args.debug:
@@ -3620,10 +4703,12 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
         output_surface_path=args.output_vtp,
         output_metadata_path=args.metadata_json,
         segments=ordered_segments,
+        transition_interfaces=transition_interfaces,
         warnings=warnings,
         termination_mode=termination_mode,
         centerline_info=centerline_info,
         total_cells=int(surface_clean.GetNumberOfCells()),
+        assignment_mode_counts=assignment_mode_counts,
     )
     metadata["face_partition_region_count"] = int(len(face_regions))
     metadata["cell_assignment_total_fallback"] = int(total_fallback)

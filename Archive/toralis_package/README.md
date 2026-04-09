@@ -1,0 +1,69 @@
+# Toralis EVAR Package
+
+This package wraps the provided `orientation.py` and `measure_infrarenal_neck.py` scripts into one installable command:
+
+```bash
+toralis_evar
+```
+
+The command prompts for a `.vtp` 3D model path, runs the orientation stage, then runs the infrarenal neck measurement stage.
+
+If the detected maximum equivalent aneurysm diameter is below `30.0 mm`, the CLI returns:
+
+```text
+not aortic aneurysm
+```
+
+and writes a result file explaining why.
+
+## Important runtime requirement
+
+Your Python environment must already have the scientific/runtime dependencies needed by the original code, especially:
+
+- `vtk`
+- `numpy`
+- VMTK Python bindings (`vtkvmtk` / `vmtk`)
+
+This package does not vendor or auto-install VMTK.
+
+## Local install
+
+From this folder:
+
+```bash
+cd /Users/ahashganeshamoorthy/Desktop/toralis_package
+pip install .
+```
+
+After install:
+
+```bash
+toralis_evar
+```
+
+You can also pass the file path directly:
+
+```bash
+toralis_evar /full/path/to/model.vtp
+```
+
+## Outputs
+
+By default, outputs are written next to the input file in:
+
+```text
+<input_file_stem>_toralis_output/
+```
+
+Files created there:
+
+- `oriented_surface_with_centerlines.vtp`
+- `oriented_labeled_centerlines.vtp`
+- `oriented_labeled_centerlines_metadata.json`
+- `infrarenal_neck_colored.vtp`
+- `infrarenal_neck_report.txt`
+- `toralis_result.txt`
+
+## Note about `pip install toralis`
+
+That exact command only works after publishing the package to PyPI. Right now this is prepared as a local installable package.
