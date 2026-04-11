@@ -26,10 +26,58 @@
       0.09162687389257596,
       0.994362623981151
     ],
+    "branch_extraction": {
+      "succeeded": false,
+      "group_count": 0,
+      "tract_count": 0
+    },
     "endpoint_count": 11,
     "junction_keynode_count": 9,
     "reduced_supernode_count": 15,
     "segment_record_count": 14
+  },
+  "mesh_preflight": {
+    "input_boundary_edge_count": 0,
+    "cleaned_boundary_edge_count": 0,
+    "non_manifold_edge_count": 0,
+    "non_manifold_edge_threshold": 231,
+    "cleaned_cell_count": 231992,
+    "cleaned_point_count": 115998,
+    "cleaned_poly_count": 231992
+  },
+  "branch_extraction": {
+    "succeeded": false,
+    "group_count": 0,
+    "tract_count": 0
+  },
+  "bifurcation_sections_available": false,
+  "bifurcation_profiles_available": false,
+  "post_assignment_qa": {
+    "fragmented_segments": [
+      {
+        "segment_id": 2,
+        "region_count": 3
+      },
+      {
+        "segment_id": 7,
+        "region_count": 2
+      },
+      {
+        "segment_id": 11,
+        "region_count": 2
+      },
+      {
+        "segment_id": 13,
+        "region_count": 2
+      },
+      {
+        "segment_id": 14,
+        "region_count": 3
+      }
+    ],
+    "high_fallback_segments": [],
+    "degenerate_barriers": [],
+    "unassigned_cell_count": 0
   },
   "segment_count": 14,
   "segments": [
@@ -50,9 +98,9 @@
         86.33966022301775
       ],
       "proximal_boundary_normal": [
-        0.3092734244378065,
+        0.3092734244378063,
         0.26492621697823904,
-        -0.9133258172712033
+        -0.9133258172712035
       ],
       "distal_boundary_normal": [
         -0.12272128887893326,
@@ -60,186 +108,6 @@
         0.9902683095765579
       ],
       "proximal_boundary_profile_points": [
-        [
-          -0.4715563952922821,
-          13.566043853759766,
-          87.82515716552734
-        ],
-        [
-          -0.5640045404434204,
-          13.68769359588623,
-          87.82913208007812
-        ],
-        [
-          -0.6625236868858337,
-          13.801804542541504,
-          87.82887268066406
-        ],
-        [
-          -0.745039701461792,
-          13.882570266723633,
-          87.8243637084961
-        ],
-        [
-          -0.8299412131309509,
-          13.9506254196167,
-          87.81535339355469
-        ],
-        [
-          -0.8912752866744995,
-          13.990964889526367,
-          87.80628204345703
-        ],
-        [
-          -0.9542658925056458,
-          14.026134490966797,
-          87.79515838623047
-        ],
-        [
-          -1.0211914777755737,
-          14.057668685913086,
-          87.7816390991211
-        ],
-        [
-          -1.0906257629394531,
-          14.084880828857422,
-          87.76602172851562
-        ],
-        [
-          -1.1534336805343628,
-          14.105185508728027,
-          87.75064086914062
-        ],
-        [
-          -1.2286750078201294,
-          14.124568939208984,
-          87.73078918457031
-        ],
-        [
-          -1.3729994297027588,
-          14.147809028625488,
-          87.68865203857422
-        ],
-        [
-          -1.5174472332000732,
-          14.153947830200195,
-          87.64152526855469
-        ],
-        [
-          -1.6583589315414429,
-          14.144194602966309,
-          87.59098052978516
-        ],
-        [
-          -1.8015369176864624,
-          14.118927001953125,
-          87.53516387939453
-        ],
-        [
-          -1.9050946235656738,
-          14.09119701385498,
-          87.49205780029297
-        ],
-        [
-          -2.003427743911743,
-          14.056757926940918,
-          87.44876861572266
-        ],
-        [
-          -2.0694003105163574,
-          14.028158187866211,
-          87.41812896728516
-        ],
-        [
-          -2.1285061836242676,
-          13.997894287109375,
-          87.38933563232422
-        ],
-        [
-          -2.18796443939209,
-          13.962016105651855,
-          87.35879516601562
-        ],
-        [
-          -2.244762420654297,
-          13.921521186828613,
-          87.32781982421875
-        ],
-        [
-          -2.3205208778381348,
-          13.856277465820312,
-          87.28324127197266
-        ],
-        [
-          -2.3955190181732178,
-          13.775996208190918,
-          87.23455810546875
-        ],
-        [
-          -2.4655954837799072,
-          13.681696891784668,
-          87.1834716796875
-        ],
-        [
-          -2.5130345821380615,
-          13.601051330566406,
-          87.1440200805664
-        ],
-        [
-          -2.5440382957458496,
-          13.53474235534668,
-          87.1142807006836
-        ],
-        [
-          -2.567415952682495,
-          13.470732688903809,
-          87.08779907226562
-        ],
-        [
-          -2.592071056365967,
-          13.367602348327637,
-          87.0495376586914
-        ],
-        [
-          -2.6019129753112793,
-          13.257147789001465,
-          87.01416778564453
-        ],
-        [
-          -2.6004860401153564,
-          13.195531845092773,
-          86.99677276611328
-        ],
-        [
-          -2.5952227115631104,
-          13.141912460327148,
-          86.98300170898438
-        ],
-        [
-          -2.586555242538452,
-          13.090452194213867,
-          86.97101593017578
-        ],
-        [
-          -2.573615074157715,
-          13.037187576293945,
-          86.95994567871094
-        ],
-        [
-          -2.5543887615203857,
-          12.978171348571777,
-          86.94933319091797
-        ],
-        [
-          -2.521925687789917,
-          12.899462699890137,
-          86.9375
-        ],
-        [
-          -2.420041799545288,
-          12.694857597351074,
-          86.91265106201172
-        ],
         [
           -2.321298360824585,
           12.486231803894043,
@@ -434,6 +302,186 @@
           -0.4715563952922821,
           13.566043853759766,
           87.82515716552734
+        ],
+        [
+          -0.5640045404434204,
+          13.68769359588623,
+          87.82913208007812
+        ],
+        [
+          -0.6625236868858337,
+          13.801804542541504,
+          87.82887268066406
+        ],
+        [
+          -0.745039701461792,
+          13.882570266723633,
+          87.8243637084961
+        ],
+        [
+          -0.8299412131309509,
+          13.9506254196167,
+          87.81535339355469
+        ],
+        [
+          -0.8912752866744995,
+          13.990964889526367,
+          87.80628204345703
+        ],
+        [
+          -0.9542658925056458,
+          14.026134490966797,
+          87.79515838623047
+        ],
+        [
+          -1.0211914777755737,
+          14.057668685913086,
+          87.7816390991211
+        ],
+        [
+          -1.0906257629394531,
+          14.084880828857422,
+          87.76602172851562
+        ],
+        [
+          -1.1534336805343628,
+          14.105185508728027,
+          87.75064086914062
+        ],
+        [
+          -1.2286750078201294,
+          14.124568939208984,
+          87.73078918457031
+        ],
+        [
+          -1.3729994297027588,
+          14.147809028625488,
+          87.68865203857422
+        ],
+        [
+          -1.5174472332000732,
+          14.153947830200195,
+          87.64152526855469
+        ],
+        [
+          -1.6583589315414429,
+          14.144194602966309,
+          87.59098052978516
+        ],
+        [
+          -1.8015369176864624,
+          14.118927001953125,
+          87.53516387939453
+        ],
+        [
+          -1.9050946235656738,
+          14.09119701385498,
+          87.49205780029297
+        ],
+        [
+          -2.003427743911743,
+          14.056757926940918,
+          87.44876861572266
+        ],
+        [
+          -2.0694003105163574,
+          14.028158187866211,
+          87.41812896728516
+        ],
+        [
+          -2.1285061836242676,
+          13.997894287109375,
+          87.38933563232422
+        ],
+        [
+          -2.18796443939209,
+          13.962016105651855,
+          87.35879516601562
+        ],
+        [
+          -2.244762420654297,
+          13.921521186828613,
+          87.32781982421875
+        ],
+        [
+          -2.3205208778381348,
+          13.856277465820312,
+          87.28324127197266
+        ],
+        [
+          -2.3955190181732178,
+          13.775996208190918,
+          87.23455810546875
+        ],
+        [
+          -2.4655954837799072,
+          13.681696891784668,
+          87.1834716796875
+        ],
+        [
+          -2.5130345821380615,
+          13.601051330566406,
+          87.1440200805664
+        ],
+        [
+          -2.5440382957458496,
+          13.53474235534668,
+          87.1142807006836
+        ],
+        [
+          -2.567415952682495,
+          13.470732688903809,
+          87.08779907226562
+        ],
+        [
+          -2.592071056365967,
+          13.367602348327637,
+          87.0495376586914
+        ],
+        [
+          -2.6019129753112793,
+          13.257147789001465,
+          87.01416778564453
+        ],
+        [
+          -2.6004860401153564,
+          13.195531845092773,
+          86.99677276611328
+        ],
+        [
+          -2.5952227115631104,
+          13.141912460327148,
+          86.98300170898438
+        ],
+        [
+          -2.586555242538452,
+          13.090452194213867,
+          86.97101593017578
+        ],
+        [
+          -2.573615074157715,
+          13.037187576293945,
+          86.95994567871094
+        ],
+        [
+          -2.5543887615203857,
+          12.978171348571777,
+          86.94933319091797
+        ],
+        [
+          -2.521925687789917,
+          12.899462699890137,
+          86.9375
+        ],
+        [
+          -2.420041799545288,
+          12.694857597351074,
+          86.91265106201172
+        ],
+        [
+          -2.321298360824585,
+          12.486231803894043,
+          86.88556671142578
         ]
       ],
       "distal_boundary_profile_points": [
@@ -3333,7 +3381,7 @@
         "proximal_fallback_used": false,
         "distal_fallback_used": false
       },
-      "interface_method_tag": "refined_parent_daughter_interface",
+      "interface_method_tag": "heuristic_fallback",
       "boundary_confidence_detail": {
         "proximal_boundary_confidence": 0.7065802695096765,
         "distal_boundary_confidence": 0.7228897714460837,
@@ -5229,7 +5277,7 @@
         "proximal_fallback_used": false,
         "distal_fallback_used": false
       },
-      "interface_method_tag": "refined_parent_daughter_interface",
+      "interface_method_tag": "heuristic_fallback",
       "boundary_confidence_detail": {
         "proximal_boundary_confidence": 0.6626729727722775,
         "distal_boundary_confidence": 0.9,
@@ -5273,8 +5321,8 @@
       ],
       "distal_boundary_normal": [
         0.9323101120192698,
-        -0.15639566465541244,
-        -0.3260954631754457
+        -0.15639566465541227,
+        -0.3260954631754456
       ],
       "proximal_boundary_profile_points": [
         [
@@ -6390,6 +6438,56 @@
       ],
       "distal_boundary_profile_points": [
         [
+          -2.4296915531158447,
+          19.2451171875,
+          81.5162353515625
+        ],
+        [
+          -2.426896572113037,
+          19.233850479125977,
+          81.52963256835938
+        ],
+        [
+          -2.4238054752349854,
+          19.223297119140625,
+          81.54352569580078
+        ],
+        [
+          -2.4197263717651367,
+          19.211637496948242,
+          81.56078338623047
+        ],
+        [
+          -2.4161150455474854,
+          19.202972412109375,
+          81.57526397705078
+        ],
+        [
+          -2.4120123386383057,
+          19.194623947143555,
+          81.59099578857422
+        ],
+        [
+          -2.407332420349121,
+          19.186687469482422,
+          81.60818481445312
+        ],
+        [
+          -2.4025580883026123,
+          19.18004608154297,
+          81.6250228881836
+        ],
+        [
+          -2.397514581680298,
+          19.174388885498047,
+          81.64215087890625
+        ],
+        [
+          -2.392076015472412,
+          19.169649124145508,
+          81.65997314453125
+        ],
+        [
           -2.386418342590332,
           19.1660213470459,
           81.67788696289062
@@ -6903,56 +7001,6 @@
           -2.4296915531158447,
           19.2451171875,
           81.5162353515625
-        ],
-        [
-          -2.426896572113037,
-          19.233850479125977,
-          81.52963256835938
-        ],
-        [
-          -2.4238054752349854,
-          19.223297119140625,
-          81.54352569580078
-        ],
-        [
-          -2.4197263717651367,
-          19.211637496948242,
-          81.56078338623047
-        ],
-        [
-          -2.4161150455474854,
-          19.202972412109375,
-          81.57526397705078
-        ],
-        [
-          -2.4120123386383057,
-          19.194623947143555,
-          81.59099578857422
-        ],
-        [
-          -2.407332420349121,
-          19.186687469482422,
-          81.60818481445312
-        ],
-        [
-          -2.4025580883026123,
-          19.18004608154297,
-          81.6250228881836
-        ],
-        [
-          -2.397514581680298,
-          19.174388885498047,
-          81.64215087890625
-        ],
-        [
-          -2.392076015472412,
-          19.169649124145508,
-          81.65997314453125
-        ],
-        [
-          -2.386418342590332,
-          19.1660213470459,
-          81.67788696289062
         ]
       ],
       "centerline_path_point_ids": [
@@ -7116,7 +7164,7 @@
         "proximal_fallback_used": false,
         "distal_fallback_used": false
       },
-      "interface_method_tag": "refined_parent_daughter_interface",
+      "interface_method_tag": "heuristic_fallback",
       "boundary_confidence_detail": {
         "proximal_boundary_confidence": 0.6331595719424592,
         "distal_boundary_confidence": 0.9,
@@ -9558,7 +9606,7 @@
         "proximal_fallback_used": false,
         "distal_fallback_used": false
       },
-      "interface_method_tag": "refined_parent_daughter_interface",
+      "interface_method_tag": "heuristic_fallback",
       "boundary_confidence_detail": {
         "proximal_boundary_confidence": 0.6369436950539512,
         "distal_boundary_confidence": 0.6679926375691797,
@@ -9604,9 +9652,9 @@
         -0.9722227530863055
       ],
       "distal_boundary_normal": [
-        0.7712949638665317,
-        0.6350782575421307,
-        0.04218631900719556
+        0.7712949638665318,
+        0.6350782575421305,
+        0.04218631900719555
       ],
       "proximal_boundary_profile_points": [
         [
@@ -10762,51 +10810,6 @@
       ],
       "distal_boundary_profile_points": [
         [
-          -7.631059646606445,
-          14.06971549987793,
-          76.57588958740234
-        ],
-        [
-          -7.643743515014648,
-          14.086352348327637,
-          76.55734252929688
-        ],
-        [
-          -7.654473781585693,
-          14.10074520111084,
-          76.53684997558594
-        ],
-        [
-          -7.659408092498779,
-          14.10750675201416,
-          76.52527618408203
-        ],
-        [
-          -7.663919448852539,
-          14.113804817199707,
-          76.512939453125
-        ],
-        [
-          -7.667838096618652,
-          14.119402885437012,
-          76.50032043457031
-        ],
-        [
-          -7.67121696472168,
-          14.124374389648438,
-          76.48725128173828
-        ],
-        [
-          -7.674046039581299,
-          14.128706932067871,
-          76.47374725341797
-        ],
-        [
-          -7.676301956176758,
-          14.132370948791504,
-          76.4598388671875
-        ],
-        [
           -7.6779561042785645,
           14.135331153869629,
           76.44551849365234
@@ -11155,6 +11158,51 @@
           -7.631059646606445,
           14.06971549987793,
           76.57588958740234
+        ],
+        [
+          -7.643743515014648,
+          14.086352348327637,
+          76.55734252929688
+        ],
+        [
+          -7.654473781585693,
+          14.10074520111084,
+          76.53684997558594
+        ],
+        [
+          -7.659408092498779,
+          14.10750675201416,
+          76.52527618408203
+        ],
+        [
+          -7.663919448852539,
+          14.113804817199707,
+          76.512939453125
+        ],
+        [
+          -7.667838096618652,
+          14.119402885437012,
+          76.50032043457031
+        ],
+        [
+          -7.67121696472168,
+          14.124374389648438,
+          76.48725128173828
+        ],
+        [
+          -7.674046039581299,
+          14.128706932067871,
+          76.47374725341797
+        ],
+        [
+          -7.676301956176758,
+          14.132370948791504,
+          76.4598388671875
+        ],
+        [
+          -7.6779561042785645,
+          14.135331153869629,
+          76.44551849365234
         ]
       ],
       "centerline_path_point_ids": [
@@ -11342,7 +11390,7 @@
         "proximal_fallback_used": false,
         "distal_fallback_used": false
       },
-      "interface_method_tag": "refined_parent_daughter_interface",
+      "interface_method_tag": "heuristic_fallback",
       "boundary_confidence_detail": {
         "proximal_boundary_confidence": 0.6261730093523336,
         "distal_boundary_confidence": 0.9,
@@ -12720,7 +12768,7 @@
         "proximal_fallback_used": false,
         "distal_fallback_used": false
       },
-      "interface_method_tag": "refined_parent_daughter_interface",
+      "interface_method_tag": "heuristic_fallback",
       "boundary_confidence_detail": {
         "proximal_boundary_confidence": 0.7228897714460837,
         "distal_boundary_confidence": 0.9,
@@ -14075,7 +14123,7 @@
         "proximal_fallback_used": false,
         "distal_fallback_used": false
       },
-      "interface_method_tag": "refined_parent_daughter_interface",
+      "interface_method_tag": "heuristic_fallback",
       "boundary_confidence_detail": {
         "proximal_boundary_confidence": 0.6970459343290424,
         "distal_boundary_confidence": 0.9,
@@ -15224,7 +15272,7 @@
         "proximal_fallback_used": false,
         "distal_fallback_used": false
       },
-      "interface_method_tag": "refined_parent_daughter_interface",
+      "interface_method_tag": "heuristic_fallback",
       "boundary_confidence_detail": {
         "proximal_boundary_confidence": 0.6937597846195838,
         "distal_boundary_confidence": 0.9,
@@ -16490,7 +16538,7 @@
         "proximal_fallback_used": false,
         "distal_fallback_used": false
       },
-      "interface_method_tag": "refined_parent_daughter_interface",
+      "interface_method_tag": "heuristic_fallback",
       "boundary_confidence_detail": {
         "proximal_boundary_confidence": 0.6897356258407862,
         "distal_boundary_confidence": 0.9,
@@ -18356,7 +18404,7 @@
         "proximal_fallback_used": false,
         "distal_fallback_used": false
       },
-      "interface_method_tag": "refined_parent_daughter_interface",
+      "interface_method_tag": "heuristic_fallback",
       "boundary_confidence_detail": {
         "proximal_boundary_confidence": 0.6676247279697315,
         "distal_boundary_confidence": 0.9,
@@ -20999,7 +21047,7 @@
         "proximal_fallback_used": false,
         "distal_fallback_used": false
       },
-      "interface_method_tag": "refined_parent_daughter_interface",
+      "interface_method_tag": "heuristic_fallback",
       "boundary_confidence_detail": {
         "proximal_boundary_confidence": 0.6679926375691797,
         "distal_boundary_confidence": 0.7195893276500986,
@@ -22915,7 +22963,7 @@
         "proximal_fallback_used": false,
         "distal_fallback_used": false
       },
-      "interface_method_tag": "refined_parent_daughter_interface",
+      "interface_method_tag": "heuristic_fallback",
       "boundary_confidence_detail": {
         "proximal_boundary_confidence": 0.7020350041021322,
         "distal_boundary_confidence": 0.9,
@@ -24769,7 +24817,7 @@
         "proximal_fallback_used": false,
         "distal_fallback_used": false
       },
-      "interface_method_tag": "refined_parent_daughter_interface",
+      "interface_method_tag": "heuristic_fallback",
       "boundary_confidence_detail": {
         "proximal_boundary_confidence": 0.7195893276500986,
         "distal_boundary_confidence": 0.9,
@@ -25496,7 +25544,8 @@
       ],
       "confidence": 0.7228897714460837,
       "connection_zone_score": 0.7228897714460837,
-      "method_tag": "refined_parent_daughter_interface",
+      "method_tag": "heuristic_fallback",
+      "junction_type": "side_branch",
       "representative_child_abscissa": 0.0,
       "stable_zone_start_abscissa": 0.0,
       "stable_zone_end_abscissa": 7.867395,
@@ -25521,7 +25570,9 @@
       "local_barrier_cell_count": 3357,
       "local_child_cell_count": 10009,
       "local_parent_cell_count": 86771,
-      "warnings": []
+      "warnings": [
+        "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 1 child 7 parent 2: one_sided_partition"
+      ]
     },
     {
       "interface_id": 2,
@@ -26882,7 +26933,8 @@
       ],
       "confidence": 0.7195893276500986,
       "connection_zone_score": 0.7195893276500986,
-      "method_tag": "refined_parent_daughter_interface",
+      "method_tag": "heuristic_fallback",
+      "junction_type": "bifurcation",
       "representative_child_abscissa": 0.0,
       "stable_zone_start_abscissa": 0.0,
       "stable_zone_end_abscissa": 5.264589,
@@ -26907,7 +26959,9 @@
       "local_barrier_cell_count": 3488,
       "local_child_cell_count": 44616,
       "local_parent_cell_count": 27757,
-      "warnings": []
+      "warnings": [
+        "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 2 child 14 parent 12: not enough values to unpack (expected 3, got 2)"
+      ]
     },
     {
       "interface_id": 3,
@@ -27853,7 +27907,8 @@
       ],
       "confidence": 0.7065802695096765,
       "connection_zone_score": 0.7065802695096765,
-      "method_tag": "refined_parent_daughter_interface",
+      "method_tag": "heuristic_fallback",
+      "junction_type": "side_branch",
       "representative_child_abscissa": 0.0,
       "stable_zone_start_abscissa": 0.0,
       "stable_zone_end_abscissa": 5.729095,
@@ -27878,7 +27933,9 @@
       "local_barrier_cell_count": 1260,
       "local_child_cell_count": 6251,
       "local_parent_cell_count": 1898,
-      "warnings": []
+      "warnings": [
+        "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 3 child 2 parent 1: not enough values to unpack (expected 3, got 2)"
+      ]
     },
     {
       "interface_id": 4,
@@ -29259,7 +29316,8 @@
       ],
       "confidence": 0.7020350041021322,
       "connection_zone_score": 0.7020350041021322,
-      "method_tag": "refined_parent_daughter_interface",
+      "method_tag": "heuristic_fallback",
+      "junction_type": "bifurcation",
       "representative_child_abscissa": 2.140315,
       "stable_zone_start_abscissa": 0.105054,
       "stable_zone_end_abscissa": 4.122307,
@@ -29284,7 +29342,9 @@
       "local_barrier_cell_count": 6315,
       "local_child_cell_count": 23316,
       "local_parent_cell_count": 50480,
-      "warnings": []
+      "warnings": [
+        "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 4 child 13 parent 12: one_sided_partition"
+      ]
     },
     {
       "interface_id": 5,
@@ -29920,7 +29980,8 @@
       ],
       "confidence": 0.6970459343290424,
       "connection_zone_score": 0.6970459343290424,
-      "method_tag": "refined_parent_daughter_interface",
+      "method_tag": "heuristic_fallback",
+      "junction_type": "side_branch",
       "representative_child_abscissa": 0.841384,
       "stable_zone_start_abscissa": 0.0,
       "stable_zone_end_abscissa": 8.07729,
@@ -29945,7 +30006,9 @@
       "local_barrier_cell_count": 1582,
       "local_child_cell_count": 10076,
       "local_parent_cell_count": 92594,
-      "warnings": []
+      "warnings": [
+        "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 5 child 8 parent 2: one_sided_partition"
+      ]
     },
     {
       "interface_id": 6,
@@ -30651,7 +30714,8 @@
       ],
       "confidence": 0.6937597846195838,
       "connection_zone_score": 0.6937597846195838,
-      "method_tag": "refined_parent_daughter_interface",
+      "method_tag": "heuristic_fallback",
+      "junction_type": "side_branch",
       "representative_child_abscissa": 0.248373,
       "stable_zone_start_abscissa": 0.0,
       "stable_zone_end_abscissa": 5.742358,
@@ -30676,7 +30740,9 @@
       "local_barrier_cell_count": 3403,
       "local_child_cell_count": 8227,
       "local_parent_cell_count": 30349,
-      "warnings": []
+      "warnings": [
+        "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 6 child 9 parent 2: one_sided_partition"
+      ]
     },
     {
       "interface_id": 7,
@@ -31377,7 +31443,8 @@
       ],
       "confidence": 0.6897356258407862,
       "connection_zone_score": 0.6897356258407862,
-      "method_tag": "refined_parent_daughter_interface",
+      "method_tag": "heuristic_fallback",
+      "junction_type": "side_branch",
       "representative_child_abscissa": 0.126807,
       "stable_zone_start_abscissa": 0.0,
       "stable_zone_end_abscissa": 6.467181,
@@ -31402,7 +31469,9 @@
       "local_barrier_cell_count": 2811,
       "local_child_cell_count": 8105,
       "local_parent_cell_count": 30023,
-      "warnings": []
+      "warnings": [
+        "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 7 child 10 parent 2: one_sided_partition"
+      ]
     },
     {
       "interface_id": 8,
@@ -32633,7 +32702,8 @@
       ],
       "confidence": 0.6679926375691797,
       "connection_zone_score": 0.6679926375691797,
-      "method_tag": "refined_parent_daughter_interface",
+      "method_tag": "heuristic_fallback",
+      "junction_type": "bifurcation",
       "representative_child_abscissa": 0.0,
       "stable_zone_start_abscissa": 0.0,
       "stable_zone_end_abscissa": 1.336009,
@@ -32658,7 +32728,9 @@
       "local_barrier_cell_count": 1718,
       "local_child_cell_count": 20428,
       "local_parent_cell_count": 3907,
-      "warnings": []
+      "warnings": [
+        "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 8 child 12 parent 5: not enough values to unpack (expected 3, got 2)"
+      ]
     },
     {
       "interface_id": 9,
@@ -33914,7 +33986,8 @@
       ],
       "confidence": 0.6676247279697315,
       "connection_zone_score": 0.6676247279697315,
-      "method_tag": "refined_parent_daughter_interface",
+      "method_tag": "heuristic_fallback",
+      "junction_type": "bifurcation",
       "representative_child_abscissa": 0.104132,
       "stable_zone_start_abscissa": 0.0,
       "stable_zone_end_abscissa": 4.916768,
@@ -33939,7 +34012,9 @@
       "local_barrier_cell_count": 1716,
       "local_child_cell_count": 49507,
       "local_parent_cell_count": 3926,
-      "warnings": []
+      "warnings": [
+        "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 9 child 11 parent 5: not enough values to unpack (expected 3, got 2)"
+      ]
     },
     {
       "interface_id": 10,
@@ -35055,7 +35130,8 @@
       ],
       "confidence": 0.6626729727722775,
       "connection_zone_score": 0.6626729727722775,
-      "method_tag": "refined_parent_daughter_interface",
+      "method_tag": "heuristic_fallback",
+      "junction_type": "side_branch",
       "representative_child_abscissa": 0.511021,
       "stable_zone_start_abscissa": 0.0,
       "stable_zone_end_abscissa": 5.715037,
@@ -35080,7 +35156,9 @@
       "local_barrier_cell_count": 1546,
       "local_child_cell_count": 10987,
       "local_parent_cell_count": 3791,
-      "warnings": []
+      "warnings": [
+        "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 10 child 3 parent 1: not enough values to unpack (expected 3, got 2)"
+      ]
     },
     {
       "interface_id": 11,
@@ -36246,7 +36324,8 @@
       ],
       "confidence": 0.6369436950539512,
       "connection_zone_score": 0.6369436950539512,
-      "method_tag": "refined_parent_daughter_interface",
+      "method_tag": "heuristic_fallback",
+      "junction_type": "side_branch",
       "representative_child_abscissa": 1.111387,
       "stable_zone_start_abscissa": 0.108617,
       "stable_zone_end_abscissa": 1.778219,
@@ -36271,7 +36350,9 @@
       "local_barrier_cell_count": 1515,
       "local_child_cell_count": 8022,
       "local_parent_cell_count": 5254,
-      "warnings": []
+      "warnings": [
+        "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 11 child 5 parent 1: one_sided_partition"
+      ]
     },
     {
       "interface_id": 12,
@@ -37422,7 +37503,8 @@
       ],
       "confidence": 0.6331595719424592,
       "connection_zone_score": 0.6331595719424592,
-      "method_tag": "refined_parent_daughter_interface",
+      "method_tag": "heuristic_fallback",
+      "junction_type": "side_branch",
       "representative_child_abscissa": 0.0,
       "stable_zone_start_abscissa": 0.0,
       "stable_zone_end_abscissa": 4.002414,
@@ -37447,7 +37529,9 @@
       "local_barrier_cell_count": 1544,
       "local_child_cell_count": 11396,
       "local_parent_cell_count": 5516,
-      "warnings": []
+      "warnings": [
+        "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 12 child 4 parent 1: one_sided_partition"
+      ]
     },
     {
       "interface_id": 13,
@@ -38638,7 +38722,8 @@
       ],
       "confidence": 0.6261730093523336,
       "connection_zone_score": 0.6261730093523336,
-      "method_tag": "refined_parent_daughter_interface",
+      "method_tag": "heuristic_fallback",
+      "junction_type": "side_branch",
       "representative_child_abscissa": 0.766367,
       "stable_zone_start_abscissa": 0.0,
       "stable_zone_end_abscissa": 4.801913,
@@ -38663,7 +38748,9 @@
       "local_barrier_cell_count": 1681,
       "local_child_cell_count": 47146,
       "local_parent_cell_count": 5816,
-      "warnings": []
+      "warnings": [
+        "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 13 child 6 parent 1: one_sided_partition"
+      ]
     }
   ],
   "cell_assignment_mode_counts": {
@@ -38672,7 +38759,30 @@
     "geodesic_propagation": 88168,
     "fallback_global_recovery": 0
   },
-  "warnings": [],
+  "warnings": [
+    "W_BRANCH_EXTRACTION_FAILED: vtkvmtkPolyDataBranchExtractor is unavailable.",
+    "W_BIFURCATION_REFERENCE_UNAVAILABLE: required arrays not found on grouped centerlines. radius_found=None, group_found=None, point_arrays=[], cell_arrays=[]",
+    "W_BIFURCATION_SECTIONS_FAILED: required arrays not found on grouped centerlines. radius_found=None, group_found=None, point_arrays=[], cell_arrays=[]",
+    "W_BIFURCATION_PROFILES_FAILED: required arrays not found on grouped centerlines. radius_found=None, group_found=None, point_arrays=[], cell_arrays=[]",
+    "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 1 child 7 parent 2: one_sided_partition",
+    "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 2 child 14 parent 12: not enough values to unpack (expected 3, got 2)",
+    "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 3 child 2 parent 1: not enough values to unpack (expected 3, got 2)",
+    "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 4 child 13 parent 12: one_sided_partition",
+    "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 5 child 8 parent 2: one_sided_partition",
+    "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 6 child 9 parent 2: one_sided_partition",
+    "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 7 child 10 parent 2: one_sided_partition",
+    "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 8 child 12 parent 5: not enough values to unpack (expected 3, got 2)",
+    "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 9 child 11 parent 5: not enough values to unpack (expected 3, got 2)",
+    "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 10 child 3 parent 1: not enough values to unpack (expected 3, got 2)",
+    "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 11 child 5 parent 1: one_sided_partition",
+    "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 12 child 4 parent 1: one_sided_partition",
+    "W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface 13 child 6 parent 1: one_sided_partition",
+    "W_QA_SEGMENT_FRAGMENTED: segment 2 has 3 disconnected regions",
+    "W_QA_SEGMENT_FRAGMENTED: segment 7 has 2 disconnected regions",
+    "W_QA_SEGMENT_FRAGMENTED: segment 11 has 2 disconnected regions",
+    "W_QA_SEGMENT_FRAGMENTED: segment 13 has 2 disconnected regions",
+    "W_QA_SEGMENT_FRAGMENTED: segment 14 has 3 disconnected regions"
+  ],
   "face_partition_region_count": 12,
   "cell_assignment_total_fallback": 0,
   "debug_outputs": {

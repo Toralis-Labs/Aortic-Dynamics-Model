@@ -349,6 +349,7 @@ class TransitionInterface:
     confidence: float
     connection_zone_score: float
     method_tag: str
+    junction_type: str = "side_branch"
     representative_child_abscissa: Optional[float] = None
     stable_zone_start_abscissa: Optional[float] = None
     stable_zone_end_abscissa: Optional[float] = None
@@ -684,6 +685,95 @@ def get_cell_array_numpy(pd: "vtkPolyData", name: str) -> Optional[np.ndarray]:
     return vtk_to_numpy(arr)
 
 
+def list_data_array_names(data: Any) -> List[str]:
+    names: List[str] = []
+    if data is None:
+        return names
+    for idx in range(int(data.GetNumberOfArrays())):
+        arr = data.GetArray(idx)
+        if arr is None:
+            continue
+        name = arr.GetName()
+        if name:
+            names.append(str(name))
+    return names
+
+
+def inspect_polydata_arrays(pd: "vtkPolyData", label: str = "") -> Dict[str, List[str]]:
+    result: Dict[str, List[str]] = {"point_arrays": [], "cell_arrays": []}
+    if pd is not None:
+        result["point_arrays"] = list_data_array_names(pd.GetPointData())
+        result["cell_arrays"] = list_data_array_names(pd.GetCellData())
+    if label:
+        sys.stderr.write(
+            f"DEBUG array inventory [{label}]: "
+            f"point={result['point_arrays']} cell={result['cell_arrays']}\n"
+        )
+    return result
+
+
+def resolve_centerline_topology_array_names(pd: "vtkPolyData", label: str = "") -> Dict[str, Any]:
+    inventory = inspect_polydata_arrays(pd, label=label)
+    point_names = inventory["point_arrays"]
+    cell_names = inventory["cell_arrays"]
+
+    def pick_name(
+        *,
+        exact_candidates: Optional[List[str]] = None,
+        contains_all: Optional[List[str]] = None,
+        contains_any: Optional[List[str]] = None,
+        exclude_tokens: Optional[List[str]] = None,
+        prefer_cell: bool = False,
+    ) -> Optional[str]:
+        candidate_sets = [cell_names, point_names] if prefer_cell else [point_names, cell_names]
+        for names in candidate_sets:
+            name = find_matching_array_name(
+                names,
+                exact_candidates=exact_candidates,
+                contains_all=contains_all,
+                contains_any=contains_any,
+                exclude_tokens=exclude_tokens,
+            )
+            if name is not None:
+                return name
+        return None
+
+    radius_name = pick_name(
+        exact_candidates=["MaximumInscribedSphereRadius"],
+        contains_all=["radius", "inscribed"],
+    )
+    if radius_name is None:
+        radius_name = pick_name(contains_any=["radius"])
+
+    return {
+        "inventory": inventory,
+        "radius_name": radius_name,
+        "group_name": pick_name(
+            exact_candidates=["GroupIds", "GroupId"],
+            contains_all=["group"],
+            exclude_tokens=["bifurcation", "tract", "blank", "centerline"],
+            prefer_cell=True,
+        ),
+        "tract_name": pick_name(
+            exact_candidates=["TractIds", "TractId"],
+            contains_all=["tract"],
+            exclude_tokens=["bifurcation", "group", "blank", "centerline"],
+            prefer_cell=True,
+        ),
+        "blanking_name": pick_name(
+            exact_candidates=["Blanking", "BlankingArray"],
+            contains_all=["blank"],
+            prefer_cell=True,
+        ),
+        "centerline_name": pick_name(
+            exact_candidates=["CenterlineIds", "CenterlineId"],
+            contains_all=["centerline"],
+            exclude_tokens=["bifurcation", "group", "tract", "blank"],
+            prefer_cell=True,
+        ),
+    }
+
+
 def count_boundary_edges(pd: "vtkPolyData") -> int:
     fe = vtk.vtkFeatureEdges()
     fe.SetInputData(pd)
@@ -822,12 +912,13 @@ def find_face_partition_array_name(pd: "vtkPolyData") -> Optional[str]:
     return best
 
 
-def sanitize_surface_for_segmentation(pd_in: "vtkPolyData", warnings: List[str]) -> "vtkPolyData":
+def sanitize_surface_for_segmentation(pd_in: "vtkPolyData", warnings: List[str]) -> Tuple["vtkPolyData", Dict[str, Any]]:
     if pd_in is None or pd_in.GetNumberOfPoints() < 3 or pd_in.GetNumberOfCells() < 1:
         raise RuntimeError("Input VTP is empty or invalid.")
 
     pd = vtk.vtkPolyData()
     pd.DeepCopy(pd_in)
+    input_boundary_edge_count = int(count_boundary_edges(pd))
 
     original_lines = int(pd.GetNumberOfLines())
     original_verts = int(pd.GetNumberOfVerts())
@@ -851,9 +942,43 @@ def sanitize_surface_for_segmentation(pd_in: "vtkPolyData", warnings: List[str])
         raise RuntimeError("Cleaned surface became empty.")
     if cleaned.GetNumberOfPolys() < 1:
         raise RuntimeError("Cleaned surface has no polygonal cells.")
+    if cleaned.GetNumberOfPolys() < 50 or cleaned.GetNumberOfPoints() < 30:
+        raise RuntimeError(
+            f"Surface is degenerate after cleaning (polys={int(cleaned.GetNumberOfPolys())}, points={int(cleaned.GetNumberOfPoints())})."
+        )
+
+    nonmanifold = vtk.vtkFeatureEdges()
+    nonmanifold.SetInputData(cleaned)
+    nonmanifold.BoundaryEdgesOff()
+    nonmanifold.FeatureEdgesOff()
+    nonmanifold.ManifoldEdgesOff()
+    nonmanifold.NonManifoldEdgesOn()
+    nonmanifold.Update()
+    nonmanifold_edge_count = int(nonmanifold.GetOutput().GetNumberOfCells()) if nonmanifold.GetOutput() is not None else 0
+    nonmanifold_threshold = max(1, int(0.001 * int(cleaned.GetNumberOfCells())))
+    if nonmanifold_edge_count > nonmanifold_threshold:
+        raise RuntimeError(
+            f"Mesh preflight failed: detected {nonmanifold_edge_count} non-manifold edges, exceeding threshold {nonmanifold_threshold}; "
+            "the pipeline cannot proceed safely with this mesh."
+        )
+
+    cleaned_boundary_edge_count = int(count_boundary_edges(cleaned))
+    if input_boundary_edge_count == 0 and cleaned_boundary_edge_count != 0:
+        warnings.append(
+            f"W_MESH_CLEANING_INTRODUCED_BOUNDARY: input surface had 0 boundary edges but cleaned surface has {cleaned_boundary_edge_count}."
+        )
 
     cleaned.BuildLinks()
-    return cleaned
+    mesh_preflight = {
+        "input_boundary_edge_count": int(input_boundary_edge_count),
+        "cleaned_boundary_edge_count": int(cleaned_boundary_edge_count),
+        "non_manifold_edge_count": int(nonmanifold_edge_count),
+        "non_manifold_edge_threshold": int(nonmanifold_threshold),
+        "cleaned_cell_count": int(cleaned.GetNumberOfCells()),
+        "cleaned_point_count": int(cleaned.GetNumberOfPoints()),
+        "cleaned_poly_count": int(cleaned.GetNumberOfPolys()),
+    }
+    return cleaned, mesh_preflight
 
 
 def polydata_from_cell_ids(pd: "vtkPolyData", cell_ids: List[int]) -> "vtkPolyData":
@@ -1603,6 +1728,962 @@ def compute_centerlines_with_root_trials(
     raise RuntimeError(f"Centerline extraction failed for all root trials. Last error: {last_err}")
 
 
+def find_matching_array_name(
+    names: List[str],
+    exact_candidates: Optional[List[str]] = None,
+    contains_all: Optional[List[str]] = None,
+    contains_any: Optional[List[str]] = None,
+    exclude_tokens: Optional[List[str]] = None,
+) -> Optional[str]:
+    lowered = [(str(name), str(name).lower()) for name in names]
+    exact_lookup = {str(name).lower() for name in (exact_candidates or [])}
+    for name, lower in lowered:
+        if lower in exact_lookup:
+            return name
+    for name, lower in lowered:
+        if exclude_tokens and any(str(token).lower() in lower for token in exclude_tokens):
+            continue
+        if contains_all and not all(str(token).lower() in lower for token in contains_all):
+            continue
+        if contains_any and not any(str(token).lower() in lower for token in contains_any):
+            continue
+        return name
+    return None
+
+
+def get_fuzzy_data_array_numpy(
+    pd: "vtkPolyData",
+    association: str,
+    exact_candidates: Optional[List[str]] = None,
+    contains_all: Optional[List[str]] = None,
+    contains_any: Optional[List[str]] = None,
+    exclude_tokens: Optional[List[str]] = None,
+) -> Tuple[Optional[np.ndarray], Optional[str]]:
+    if association == "point":
+        data = pd.GetPointData()
+        getter = get_point_array_numpy
+    else:
+        data = pd.GetCellData()
+        getter = get_cell_array_numpy
+    name = find_matching_array_name(
+        list_data_array_names(data),
+        exact_candidates=exact_candidates,
+        contains_all=contains_all,
+        contains_any=contains_any,
+        exclude_tokens=exclude_tokens,
+    )
+    if name is None:
+        return None, None
+    return getter(pd, name), name
+
+
+def _polyline_cell_point_ids(cell: Any) -> List[int]:
+    ids: List[int] = []
+    if cell is None:
+        return ids
+    for k in range(int(cell.GetNumberOfPoints())):
+        pid = int(cell.GetPointId(k))
+        if not ids or pid != ids[-1]:
+            ids.append(int(pid))
+    return ids
+
+
+def _scalar_from_arrays(
+    cell_array: Optional[np.ndarray],
+    point_array: Optional[np.ndarray],
+    cell_index: int,
+    point_index: int,
+    default: int = 0,
+) -> int:
+    value: Any = None
+    if cell_array is not None and 0 <= int(cell_index) < int(np.asarray(cell_array).shape[0]):
+        value = np.asarray(cell_array)[int(cell_index)]
+    elif point_array is not None and 0 <= int(point_index) < int(np.asarray(point_array).shape[0]):
+        value = np.asarray(point_array)[int(point_index)]
+    if value is None:
+        return int(default)
+    arr = np.asarray(value)
+    if arr.size == 0:
+        return int(default)
+    return int(round(float(arr.reshape(-1)[0])))
+
+
+def reconstruct_path_from_parents(parent_map: Dict[int, Optional[int]], start: int, end: int) -> List[int]:
+    cur = int(end)
+    path = [int(cur)]
+    seen = {int(cur)}
+    while cur != int(start):
+        prev = parent_map.get(int(cur))
+        if prev is None:
+            return []
+        cur = int(prev)
+        if cur in seen:
+            return []
+        seen.add(cur)
+        path.append(int(cur))
+    path.reverse()
+    return [int(v) for v in path]
+
+
+def ordered_points_for_debug_line(points: np.ndarray, normal_hint: Optional[np.ndarray] = None) -> np.ndarray:
+    pts = np.asarray(points, dtype=float)
+    if pts.shape[0] <= 2:
+        return pts
+    centroid = np.mean(pts, axis=0)
+    _, axis_u, axis_v = pca_axes(pts)
+    if normal_hint is not None and np.linalg.norm(np.asarray(normal_hint, dtype=float)) > EPS:
+        _, axis_u, axis_v = build_orthonormal_frame(np.asarray(normal_hint, dtype=float))
+    rel = pts - centroid.reshape(1, 3)
+    angles = np.arctan2(rel @ axis_v, rel @ axis_u)
+    order = np.argsort(angles, kind="mergesort")
+    return pts[np.asarray(order, dtype=int)]
+
+
+def _ordered_group_path_from_graph(
+    adjacency: Dict[int, Dict[int, float]],
+    node_points: np.ndarray,
+    cell_paths: List[List[int]],
+) -> List[int]:
+    if not adjacency:
+        return []
+    deg = {int(node): int(len(nei)) for node, nei in adjacency.items()}
+    candidates = [int(node) for node, degree in sorted(deg.items()) if int(degree) == 1]
+    if not candidates:
+        best_path = max(
+            ([int(v) for v in path] for path in cell_paths if len(path) >= 2),
+            key=lambda path: (polyline_length(node_points[np.asarray(path, dtype=int)]), len(path), tuple(path)),
+            default=[],
+        )
+        return [int(v) for v in best_path]
+    start = int(candidates[0])
+    dist0, _ = dijkstra_shortest_paths(adjacency, start)
+    far0 = sorted(dist0.keys(), key=lambda node: (float(dist0.get(int(node), -1.0)), int(node)))[-1]
+    dist1, parent1 = dijkstra_shortest_paths(adjacency, int(far0))
+    pool = [int(node) for node in candidates if int(node) in dist1]
+    if not pool:
+        pool = [int(node) for node in dist1.keys()]
+    far1 = sorted(pool, key=lambda node: (float(dist1.get(int(node), -1.0)), int(node)))[-1]
+    path = reconstruct_path_from_parents(parent1, int(far0), int(far1))
+    if len(path) >= 2:
+        return [int(v) for v in path]
+    best_path = max(
+        ([int(v) for v in path] for path in cell_paths if len(path) >= 2),
+        key=lambda path: (polyline_length(node_points[np.asarray(path, dtype=int)]), len(path), tuple(path)),
+        default=[],
+    )
+    return [int(v) for v in best_path]
+
+
+def extract_branch_topology(
+    cl: "vtkPolyData",
+    vtkvmtk_mod: Any,
+    warnings: List[str],
+) -> Tuple["vtkPolyData", bool, Dict[str, Any]]:
+    info: Dict[str, Any] = {"succeeded": False, "group_count": 0, "tract_count": 0}
+    try:
+        extractor_cls = getattr(vtkvmtk_mod, "vtkvmtkPolyDataBranchExtractor", None)
+        if extractor_cls is None:
+            raise AttributeError("vtkvmtkPolyDataBranchExtractor is unavailable.")
+        extractor = extractor_cls()
+        extractor.SetInputData(cl)
+        if hasattr(extractor, "SetRadiusArrayName"):
+            extractor.SetRadiusArrayName("MaximumInscribedSphereRadius")
+        for method_name, array_name in (
+            ("SetGroupIdsArrayName", "GroupIds"),
+            ("SetTractIdsArrayName", "TractIds"),
+            ("SetBlankingArrayName", "Blanking"),
+            ("SetCenterlineIdsArrayName", "CenterlineIds"),
+        ):
+            if hasattr(extractor, method_name):
+                getattr(extractor, method_name)(array_name)
+        extractor.Update()
+        grouped = vtk.vtkPolyData()
+        grouped.DeepCopy(extractor.GetOutput())
+        array_names = resolve_centerline_topology_array_names(grouped, label="branch_extractor_output")
+        inventory = array_names["inventory"]
+        missing = [
+            logical_name
+            for logical_name, resolved_name in (
+                ("MaximumInscribedSphereRadius", array_names["radius_name"]),
+                ("GroupIds", array_names["group_name"]),
+                ("Blanking", array_names["blanking_name"]),
+            )
+            if resolved_name is None
+        ]
+        if missing:
+            raise RuntimeError(
+                "vtkvmtkPolyDataBranchExtractor output is missing expected arrays: "
+                f"{missing}. Point arrays: {inventory['point_arrays']}. "
+                f"Cell arrays: {inventory['cell_arrays']}"
+            )
+        group_ids = get_cell_array_numpy(grouped, array_names["group_name"])
+        if group_ids is None:
+            group_ids = get_point_array_numpy(grouped, array_names["group_name"])
+        if group_ids is None:
+            raise RuntimeError("Branch extractor output did not contain a readable GroupIds array.")
+        unique_groups = sorted(int(round(float(v))) for v in np.unique(np.asarray(group_ids).reshape(-1)).tolist())
+        tract_ids = None
+        if array_names["tract_name"] is not None:
+            tract_ids = get_cell_array_numpy(grouped, array_names["tract_name"])
+            if tract_ids is None:
+                tract_ids = get_point_array_numpy(grouped, array_names["tract_name"])
+        info["group_count"] = int(len(unique_groups))
+        if tract_ids is not None:
+            info["tract_count"] = int(len(sorted(int(round(float(v))) for v in np.unique(np.asarray(tract_ids).reshape(-1)).tolist())))
+        if len(unique_groups) < 2:
+            raise RuntimeError(f"Branch extractor produced only {len(unique_groups)} unique GroupIds.")
+        info["succeeded"] = True
+        return grouped, True, info
+    except Exception as exc:
+        warnings.append(f"W_BRANCH_EXTRACTION_FAILED: {exc}")
+        return cl, False, info
+
+
+def extract_centerline_group_records(cl: "vtkPolyData") -> Dict[int, Dict[str, Any]]:
+    pts = get_points_numpy(cl)
+    radii = get_point_array_numpy(cl, "MaximumInscribedSphereRadius")
+    group_pt = get_point_array_numpy(cl, "GroupIds")
+    group_cell = get_cell_array_numpy(cl, "GroupIds")
+    blank_pt = get_point_array_numpy(cl, "Blanking")
+    blank_cell = get_cell_array_numpy(cl, "Blanking")
+    tract_pt = get_point_array_numpy(cl, "TractIds")
+    tract_cell = get_cell_array_numpy(cl, "TractIds")
+
+    raw_groups: Dict[int, Dict[str, Any]] = {}
+    for ci in range(int(cl.GetNumberOfCells())):
+        cell = cl.GetCell(ci)
+        if cell is None or cell.GetCellType() not in (vtk.VTK_POLY_LINE, vtk.VTK_LINE):
+            continue
+        point_ids = _polyline_cell_point_ids(cell)
+        if len(point_ids) < 2:
+            continue
+        group_id = _scalar_from_arrays(group_cell, group_pt, ci, point_ids[0], default=-1)
+        if group_id < 0:
+            continue
+        blanking = _scalar_from_arrays(blank_cell, blank_pt, ci, point_ids[0], default=0)
+        tract_id = _scalar_from_arrays(tract_cell, tract_pt, ci, point_ids[0], default=-1)
+        rec = raw_groups.setdefault(
+            int(group_id),
+            {
+                "group_id": int(group_id),
+                "cell_ids": [],
+                "cell_point_ids": [],
+                "blanking_values": set(),
+                "tract_ids": set(),
+            },
+        )
+        rec["cell_ids"].append(int(ci))
+        rec["cell_point_ids"].append([int(v) for v in point_ids])
+        rec["blanking_values"].add(int(blanking))
+        if tract_id >= 0:
+            rec["tract_ids"].add(int(tract_id))
+
+    group_records: Dict[int, Dict[str, Any]] = {}
+    for group_id, raw in sorted(raw_groups.items()):
+        key_to_node: Dict[Tuple[float, float, float], int] = {}
+        node_points: List[np.ndarray] = []
+        node_radii: List[float] = []
+        node_repr_ids: List[int] = []
+        cell_node_paths: List[List[int]] = []
+        for point_ids in raw["cell_point_ids"]:
+            node_path: List[int] = []
+            for pid in point_ids:
+                key = tuple(float(v) for v in np.round(pts[int(pid)], 6).tolist())
+                node = key_to_node.get(key)
+                radius_value = (
+                    float(np.asarray(radii, dtype=float).reshape(-1)[int(pid)])
+                    if radii is not None and int(pid) < int(np.asarray(radii).reshape(-1).shape[0])
+                    else float("nan")
+                )
+                if node is None:
+                    node = len(node_points)
+                    key_to_node[key] = int(node)
+                    node_points.append(np.asarray(pts[int(pid)], dtype=float).reshape(3))
+                    node_radii.append(float(radius_value))
+                    node_repr_ids.append(int(pid))
+                elif math.isfinite(radius_value):
+                    if math.isfinite(node_radii[int(node)]):
+                        node_radii[int(node)] = 0.5 * float(node_radii[int(node)] + radius_value)
+                    else:
+                        node_radii[int(node)] = float(radius_value)
+                if not node_path or int(node) != int(node_path[-1]):
+                    node_path.append(int(node))
+            if len(node_path) >= 2:
+                cell_node_paths.append([int(v) for v in node_path])
+
+        points_np = np.asarray(node_points, dtype=float) if node_points else np.zeros((0, 3), dtype=float)
+        adjacency: Dict[int, Dict[int, float]] = {}
+        for path in cell_node_paths:
+            for a, b in zip(path[:-1], path[1:]):
+                if int(a) == int(b):
+                    continue
+                w = float(np.linalg.norm(points_np[int(a)] - points_np[int(b)]))
+                if w <= EPS:
+                    continue
+                adjacency.setdefault(int(a), {})
+                adjacency.setdefault(int(b), {})
+                prev = adjacency[int(a)].get(int(b))
+                if prev is None or w < float(prev):
+                    adjacency[int(a)][int(b)] = float(w)
+                    adjacency[int(b)][int(a)] = float(w)
+
+        path_nodes_local = _ordered_group_path_from_graph(adjacency, points_np, cell_node_paths)
+        path_points = points_np[np.asarray(path_nodes_local, dtype=int)] if path_nodes_local else np.zeros((0, 3), dtype=float)
+        path_node_ids = [int(node_repr_ids[int(node)]) for node in path_nodes_local]
+        path_radii = None
+        if path_nodes_local:
+            radii_np = np.asarray(node_radii, dtype=float)
+            if np.any(np.isfinite(radii_np[np.asarray(path_nodes_local, dtype=int)])):
+                path_radii = np.asarray(radii_np[np.asarray(path_nodes_local, dtype=int)], dtype=float)
+        blanking = 1 if any(int(v) != 0 for v in raw["blanking_values"]) else 0
+        centroid = np.mean(points_np, axis=0) if points_np.shape[0] else np.zeros((3,), dtype=float)
+        if path_points.shape[0] >= 2:
+            endpoint_points = [np.asarray(path_points[0], dtype=float), np.asarray(path_points[-1], dtype=float)]
+            if path_radii is not None and np.asarray(path_radii).size >= 2:
+                endpoint_radii = [float(path_radii[0]), float(path_radii[-1])]
+            else:
+                endpoint_radii = [1.0, 1.0]
+        else:
+            endpoint_points = [np.asarray(centroid, dtype=float), np.asarray(centroid, dtype=float)]
+            endpoint_radii = [1.0, 1.0]
+        group_records[int(group_id)] = {
+            "group_id": int(group_id),
+            "blanking": int(blanking),
+            "cell_ids": [int(v) for v in raw["cell_ids"]],
+            "tract_ids": sorted(int(v) for v in raw["tract_ids"]),
+            "points": np.asarray(points_np, dtype=float),
+            "centroid": np.asarray(centroid, dtype=float).reshape(3),
+            "path_node_ids": [int(v) for v in path_node_ids],
+            "path_points": np.asarray(path_points, dtype=float),
+            "path_radii": (None if path_radii is None else np.asarray(path_radii, dtype=float)),
+            "length": float(polyline_length(path_points)),
+            "endpoint_points": [np.asarray(endpoint_points[0], dtype=float), np.asarray(endpoint_points[1], dtype=float)],
+            "endpoint_radii": [float(endpoint_radii[0]), float(endpoint_radii[1])],
+        }
+    return group_records
+
+
+def infer_bifurcation_participation(
+    group_records: Dict[int, Dict[str, Any]],
+    warnings: Optional[List[str]] = None,
+) -> Tuple[Dict[int, Dict[str, Any]], Dict[Tuple[int, int], int]]:
+    branch_groups = {
+        int(group_id): rec
+        for group_id, rec in group_records.items()
+        if int(rec.get("blanking", 0)) == 0 and np.asarray(rec.get("path_points", np.zeros((0, 3), dtype=float))).shape[0] >= 2
+    }
+    blanked_groups = {
+        int(group_id): rec
+        for group_id, rec in group_records.items()
+        if int(rec.get("blanking", 0)) != 0 and np.asarray(rec.get("points", np.zeros((0, 3), dtype=float))).shape[0] >= 1
+    }
+    bifurcations: Dict[int, Dict[str, Any]] = {}
+    endpoint_to_bifurcation: Dict[Tuple[int, int], int] = {}
+    endpoint_distances: Dict[Tuple[int, int], float] = {}
+
+    for bif_group_id, bif in sorted(blanked_groups.items()):
+        bif_points = np.asarray(bif.get("points", np.zeros((0, 3), dtype=float)), dtype=float)
+        if bif_points.shape[0] == 0:
+            continue
+        participants: Set[int] = set()
+        endpoint_matches: List[Tuple[int, int, float]] = []
+        for branch_group_id, branch in sorted(branch_groups.items()):
+            for end_idx in (0, 1):
+                endpoint = np.asarray(branch["endpoint_points"][int(end_idx)], dtype=float)
+                endpoint_radius = max(float(branch["endpoint_radii"][int(end_idx)]), 1.0)
+                min_dist = float(np.min(np.linalg.norm(bif_points - endpoint.reshape(1, 3), axis=1)))
+                tol = max(1.75 * endpoint_radius, 0.75)
+                if min_dist <= tol:
+                    participants.add(int(branch_group_id))
+                    endpoint_matches.append((int(branch_group_id), int(end_idx), float(min_dist)))
+        if len(participants) < 2:
+            continue
+        bifurcations[int(bif_group_id)] = {
+            "group_id": int(bif_group_id),
+            "points": np.asarray(bif_points, dtype=float),
+            "centroid": np.mean(bif_points, axis=0),
+            "reference_point": np.mean(bif_points, axis=0),
+            "radius": float(np.median([max(float(branch_groups[gid]["endpoint_radii"][0]), float(branch_groups[gid]["endpoint_radii"][1]), 1.0) for gid in participants])),
+            "participating_branch_group_ids": sorted(int(v) for v in participants),
+            "synthetic": False,
+        }
+        for branch_group_id, end_idx, min_dist in sorted(endpoint_matches, key=lambda item: (item[2], item[0], item[1])):
+            key = (int(branch_group_id), int(end_idx))
+            prev = endpoint_distances.get(key)
+            if prev is None or float(min_dist) < float(prev):
+                endpoint_distances[key] = float(min_dist)
+                endpoint_to_bifurcation[key] = int(bif_group_id)
+
+    endpoint_keys: List[Tuple[int, int]] = []
+    for branch_group_id in sorted(branch_groups):
+        for end_idx in (0, 1):
+            endpoint_keys.append((int(branch_group_id), int(end_idx)))
+    dsu = _DisjointSet()
+    for idx in range(len(endpoint_keys)):
+        dsu.add(int(idx))
+    for i in range(len(endpoint_keys)):
+        gid_i, end_i = endpoint_keys[i]
+        p_i = np.asarray(branch_groups[int(gid_i)]["endpoint_points"][int(end_i)], dtype=float)
+        r_i = max(float(branch_groups[int(gid_i)]["endpoint_radii"][int(end_i)]), 1.0)
+        for j in range(i + 1, len(endpoint_keys)):
+            gid_j, end_j = endpoint_keys[j]
+            if int(gid_i) == int(gid_j):
+                continue
+            p_j = np.asarray(branch_groups[int(gid_j)]["endpoint_points"][int(end_j)], dtype=float)
+            r_j = max(float(branch_groups[int(gid_j)]["endpoint_radii"][int(end_j)]), 1.0)
+            dist = float(np.linalg.norm(p_i - p_j))
+            tol = max(0.60 * (r_i + r_j), 1.50 * max(r_i, r_j), 1.0)
+            if dist <= tol:
+                dsu.union(int(i), int(j))
+    synthetic_clusters: Dict[int, List[int]] = {}
+    for idx in range(len(endpoint_keys)):
+        synthetic_clusters.setdefault(int(dsu.find(int(idx))), []).append(int(idx))
+    synthetic_counter = 1
+    for cluster_indices in sorted(synthetic_clusters.values(), key=lambda values: tuple(values)):
+        cluster_group_ids = {int(endpoint_keys[idx][0]) for idx in cluster_indices}
+        if len(cluster_group_ids) < 2:
+            continue
+        cluster_keys = [endpoint_keys[idx] for idx in cluster_indices]
+        if any(key in endpoint_to_bifurcation for key in cluster_keys):
+            continue
+        synthetic_group_id = -100000 - int(synthetic_counter)
+        synthetic_counter += 1
+        cluster_points = np.asarray(
+            [branch_groups[int(group_id)]["endpoint_points"][int(end_idx)] for group_id, end_idx in cluster_keys],
+            dtype=float,
+        )
+        cluster_radii = [
+            max(float(branch_groups[int(group_id)]["endpoint_radii"][int(end_idx)]), 1.0)
+            for group_id, end_idx in cluster_keys
+        ]
+        bifurcations[int(synthetic_group_id)] = {
+            "group_id": int(synthetic_group_id),
+            "points": np.asarray(cluster_points, dtype=float),
+            "centroid": np.mean(cluster_points, axis=0),
+            "reference_point": np.mean(cluster_points, axis=0),
+            "radius": float(np.median(cluster_radii)),
+            "participating_branch_group_ids": sorted(int(v) for v in cluster_group_ids),
+            "synthetic": True,
+        }
+        for group_id, end_idx in cluster_keys:
+            endpoint_to_bifurcation[(int(group_id), int(end_idx))] = int(synthetic_group_id)
+
+    if warnings is not None and len(branch_groups) > 1 and not bifurcations:
+        warnings.append("W_BRANCH_TOPOLOGY_NO_BIFURCATIONS: branch extraction produced multiple groups but no junction participation could be inferred.")
+    return bifurcations, endpoint_to_bifurcation
+
+
+def compute_bifurcation_reference_points(
+    grouped_centerlines: "vtkPolyData",
+    vtkvmtk_mod: Any,
+    warnings: List[str],
+) -> Dict[int, Dict[str, Any]]:
+    group_records = extract_centerline_group_records(grouped_centerlines)
+    inferred_bifurcations, _ = infer_bifurcation_participation(group_records, warnings=None)
+    array_names = resolve_centerline_topology_array_names(grouped_centerlines, label="bifurcation_reference_input")
+    radius_name = array_names["radius_name"]
+    group_name = array_names["group_name"]
+    if radius_name is None or group_name is None:
+        inventory = array_names["inventory"]
+        warnings.append(
+            "W_BIFURCATION_REFERENCE_UNAVAILABLE: required arrays not found on grouped centerlines. "
+            f"radius_found={radius_name}, group_found={group_name}, "
+            f"point_arrays={inventory['point_arrays']}, cell_arrays={inventory['cell_arrays']}"
+        )
+        return {}
+    try:
+        ref_cls = None
+        for name in (
+            "vtkvmtkPolyDataBifurcationReference",
+            "vtkvmtkPolyDataBifurcationReferenceSystems",
+            "vtkvmtkCenterlineBifurcationReferenceSystems",
+        ):
+            if hasattr(vtkvmtk_mod, name):
+                ref_cls = getattr(vtkvmtk_mod, name)
+                break
+        if ref_cls is None:
+            raise AttributeError("No VMTK bifurcation reference utility was found.")
+        reference = ref_cls()
+        reference.SetInputData(grouped_centerlines)
+        for method_name, array_name in (
+            ("SetRadiusArrayName", radius_name),
+            ("SetGroupIdsArrayName", group_name),
+            ("SetBlankingArrayName", array_names["blanking_name"]),
+            ("SetCenterlineIdsArrayName", array_names["centerline_name"]),
+            ("SetTractIdsArrayName", array_names["tract_name"]),
+        ):
+            if array_name is not None and hasattr(reference, method_name):
+                getattr(reference, method_name)(array_name)
+        reference.Update()
+        out = reference.GetOutput()
+        if out is None or out.GetNumberOfPoints() < 1:
+            return {}
+        bif_group_arr, _ = get_fuzzy_data_array_numpy(
+            out,
+            "point",
+            exact_candidates=["BifurcationGroupIds", "BifurcationGroupId"],
+            contains_all=["bifurcation", "group"],
+        )
+        if bif_group_arr is None:
+            return {}
+        point_group_arr, _ = get_fuzzy_data_array_numpy(
+            out,
+            "point",
+            exact_candidates=[group_name, "GroupIds", "GroupId"],
+            contains_all=["group"],
+            exclude_tokens=["bifurcation", "tract", "blank", "centerline"],
+        )
+        radius_arr = get_point_array_numpy(out, radius_name)
+        if radius_arr is None:
+            radius_arr, _ = get_fuzzy_data_array_numpy(
+                out,
+                "point",
+                exact_candidates=[radius_name, "MaximumInscribedSphereRadius"],
+                contains_any=["radius"],
+            )
+        pts = get_points_numpy(out)
+        refs: Dict[int, Dict[str, Any]] = {}
+        for idx in range(int(pts.shape[0])):
+            bif_group_id = int(round(float(np.asarray(np.asarray(bif_group_arr)[int(idx)]).reshape(-1)[0])))
+            inferred = inferred_bifurcations.get(int(bif_group_id), {})
+            participating = [int(v) for v in inferred.get("participating_branch_group_ids", [])]
+            if point_group_arr is not None:
+                branch_group_id = int(round(float(np.asarray(np.asarray(point_group_arr)[int(idx)]).reshape(-1)[0])))
+                if branch_group_id >= 0 and branch_group_id not in participating:
+                    participating.append(int(branch_group_id))
+            radius = float(
+                np.asarray(np.asarray(radius_arr)[int(idx)]).reshape(-1)[0]
+                if radius_arr is not None and int(idx) < int(np.asarray(radius_arr).shape[0])
+                else inferred.get("radius", 1.0)
+            )
+            refs[int(bif_group_id)] = {
+                "reference_point": np.asarray(pts[int(idx)], dtype=float).reshape(3),
+                "upstream_radius": float(max(radius, 1.0)),
+                "bifurcation_group_id": int(bif_group_id),
+                "participating_branch_group_ids": sorted(int(v) for v in set(participating)),
+            }
+        return refs
+    except Exception as exc:
+        warnings.append(f"W_BIFURCATION_REFERENCE_UNAVAILABLE: {exc}")
+        return {}
+
+
+def _polydata_cell_points(pd: "vtkPolyData", cell_index: int) -> np.ndarray:
+    cell = pd.GetCell(int(cell_index))
+    if cell is None:
+        return np.zeros((0, 3), dtype=float)
+    pts: List[np.ndarray] = []
+    for k in range(int(cell.GetNumberOfPoints())):
+        p = pd.GetPoint(int(cell.GetPointId(k)))
+        pts.append(np.asarray(p, dtype=float).reshape(3))
+    return np.asarray(pts, dtype=float)
+
+
+def extract_bifurcation_sections(
+    surface: "vtkPolyData",
+    grouped_centerlines: "vtkPolyData",
+    vtkvmtk_mod: Any,
+    warnings: List[str],
+) -> Dict[Tuple[int, int], Dict[str, Any]]:
+    array_names = resolve_centerline_topology_array_names(grouped_centerlines, label="bifurcation_sections_input")
+    radius_name = array_names["radius_name"]
+    group_name = array_names["group_name"]
+    if radius_name is None or group_name is None:
+        inventory = array_names["inventory"]
+        warnings.append(
+            "W_BIFURCATION_SECTIONS_FAILED: required arrays not found on grouped centerlines. "
+            f"radius_found={radius_name}, group_found={group_name}, "
+            f"point_arrays={inventory['point_arrays']}, cell_arrays={inventory['cell_arrays']}"
+        )
+        return {}
+    try:
+        sections_cls = getattr(vtkvmtk_mod, "vtkvmtkPolyDataBifurcationSections", None)
+        if sections_cls is None:
+            raise AttributeError("vtkvmtkPolyDataBifurcationSections is unavailable.")
+        sections = sections_cls()
+        sections.SetInputData(surface)
+        if hasattr(sections, "SetCenterlines"):
+            sections.SetCenterlines(grouped_centerlines)
+        elif hasattr(sections, "SetCenterlinesInputData"):
+            sections.SetCenterlinesInputData(grouped_centerlines)
+        elif hasattr(sections, "GetNumberOfInputPorts") and int(sections.GetNumberOfInputPorts()) > 1:
+            sections.SetInputData(1, grouped_centerlines)
+        for method_name, array_name in (
+            ("SetRadiusArrayName", radius_name),
+            ("SetGroupIdsArrayName", group_name),
+            ("SetTractIdsArrayName", array_names["tract_name"]),
+            ("SetBlankingArrayName", array_names["blanking_name"]),
+        ):
+            if array_name is not None and hasattr(sections, method_name):
+                getattr(sections, method_name)(array_name)
+        if hasattr(sections, "SetNumberOfDistanceSpheres"):
+            sections.SetNumberOfDistanceSpheres(1)
+        sections.Update()
+        out = sections.GetOutput()
+        if out is None or out.GetNumberOfCells() < 1:
+            raise RuntimeError("Bifurcation sections output was empty.")
+        child_cell_arr, _ = get_fuzzy_data_array_numpy(
+            out,
+            "cell",
+            exact_candidates=["BifurcationSectionGroupIds", "GroupIds", "GroupId"],
+            contains_all=["section", "group"],
+            exclude_tokens=["bifurcation"],
+        )
+        if child_cell_arr is None:
+            child_cell_arr, _ = get_fuzzy_data_array_numpy(
+                out,
+                "cell",
+                exact_candidates=["GroupIds", "GroupId"],
+                contains_all=["group"],
+                exclude_tokens=["bifurcation", "tract", "blank", "centerline"],
+            )
+        bif_cell_arr, _ = get_fuzzy_data_array_numpy(
+            out,
+            "cell",
+            exact_candidates=["BifurcationSectionBifurcationGroupIds", "BifurcationGroupIds", "BifurcationGroupId"],
+            contains_all=["bifurcation", "group"],
+        )
+        parent_cell_arr, _ = get_fuzzy_data_array_numpy(out, "cell", contains_any=["parentgroup", "upstreamgroup", "sourcegroup"])
+        normal_cell_arr, _ = get_fuzzy_data_array_numpy(out, "cell", contains_any=["normal"])
+        radius_cell_arr, _ = get_fuzzy_data_array_numpy(out, "cell", contains_any=["radius"])
+        result: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        for ci in range(int(out.GetNumberOfCells())):
+            contour_points = _polydata_cell_points(out, ci)
+            if contour_points.shape[0] < 2:
+                continue
+            child_group_id = _scalar_from_arrays(child_cell_arr, None, ci, 0, default=-1)
+            bif_group_id = _scalar_from_arrays(bif_cell_arr, None, ci, 0, default=-1)
+            parent_group_id = _scalar_from_arrays(parent_cell_arr, None, ci, 0, default=bif_group_id)
+            centroid = np.mean(contour_points, axis=0)
+            if normal_cell_arr is not None and int(ci) < int(np.asarray(normal_cell_arr).shape[0]):
+                normal_vec = unit(np.asarray(normal_cell_arr[int(ci)]).reshape(-1)[:3])
+            else:
+                _, normal_vec, _ = planar_polygon_area_and_normal(contour_points)
+                if np.linalg.norm(normal_vec) < EPS:
+                    normal_vec = pca_axes(contour_points)[0]
+                normal_vec = unit(normal_vec)
+            if radius_cell_arr is not None and int(ci) < int(np.asarray(radius_cell_arr).shape[0]):
+                radius_val = float(np.asarray(np.asarray(radius_cell_arr[int(ci)])).reshape(-1)[0])
+            else:
+                area = float(planar_polygon_area_and_normal(contour_points)[0])
+                radius_val = max(math.sqrt(max(area, EPS) / math.pi), 1.0)
+            key = (int(parent_group_id), int(child_group_id))
+            candidate = {
+                "contour_points": np.asarray(contour_points, dtype=float),
+                "centroid": np.asarray(centroid, dtype=float).reshape(3),
+                "normal": np.asarray(normal_vec, dtype=float).reshape(3),
+                "group_id": int(child_group_id),
+                "parent_group_id": int(parent_group_id),
+                "bifurcation_group_id": int(bif_group_id),
+                "radius": float(max(radius_val, 1.0)),
+                "quality_score": 0.85,
+            }
+            prev = result.get(key)
+            if prev is None or contour_points.shape[0] > np.asarray(prev["contour_points"]).shape[0]:
+                result[key] = candidate
+        return result
+    except Exception as exc:
+        warnings.append(f"W_BIFURCATION_SECTIONS_FAILED: {exc}")
+        return {}
+
+
+def extract_bifurcation_profiles(
+    surface: "vtkPolyData",
+    grouped_centerlines: "vtkPolyData",
+    vtkvmtk_mod: Any,
+    warnings: List[str],
+) -> Dict[int, Dict[str, Any]]:
+    array_names = resolve_centerline_topology_array_names(grouped_centerlines, label="bifurcation_profiles_input")
+    radius_name = array_names["radius_name"]
+    group_name = array_names["group_name"]
+    if radius_name is None or group_name is None:
+        inventory = array_names["inventory"]
+        warnings.append(
+            "W_BIFURCATION_PROFILES_FAILED: required arrays not found on grouped centerlines. "
+            f"radius_found={radius_name}, group_found={group_name}, "
+            f"point_arrays={inventory['point_arrays']}, cell_arrays={inventory['cell_arrays']}"
+        )
+        return {}
+    try:
+        profiles_cls = getattr(vtkvmtk_mod, "vtkvmtkPolyDataBifurcationProfiles", None)
+        if profiles_cls is None:
+            raise AttributeError("vtkvmtkPolyDataBifurcationProfiles is unavailable.")
+        profiles = profiles_cls()
+        profiles.SetInputData(surface)
+        if hasattr(profiles, "SetCenterlines"):
+            profiles.SetCenterlines(grouped_centerlines)
+        elif hasattr(profiles, "SetCenterlinesInputData"):
+            profiles.SetCenterlinesInputData(grouped_centerlines)
+        elif hasattr(profiles, "GetNumberOfInputPorts") and int(profiles.GetNumberOfInputPorts()) > 1:
+            profiles.SetInputData(1, grouped_centerlines)
+        for method_name, array_name in (
+            ("SetRadiusArrayName", radius_name),
+            ("SetGroupIdsArrayName", group_name),
+            ("SetTractIdsArrayName", array_names["tract_name"]),
+            ("SetBlankingArrayName", array_names["blanking_name"]),
+        ):
+            if array_name is not None and hasattr(profiles, method_name):
+                getattr(profiles, method_name)(array_name)
+        profiles.Update()
+        out = profiles.GetOutput()
+        if out is None or out.GetNumberOfCells() < 1:
+            raise RuntimeError("Bifurcation profiles output was empty.")
+        bif_cell_arr, _ = get_fuzzy_data_array_numpy(
+            out,
+            "cell",
+            exact_candidates=["BifurcationProfileBifurcationGroupIds", "BifurcationGroupIds", "BifurcationGroupId"],
+            contains_all=["bifurcation", "group"],
+        )
+        normal_cell_arr, _ = get_fuzzy_data_array_numpy(out, "cell", contains_any=["normal"])
+        result: Dict[int, Dict[str, Any]] = {}
+        for ci in range(int(out.GetNumberOfCells())):
+            profile_points = _polydata_cell_points(out, ci)
+            if profile_points.shape[0] < 2:
+                continue
+            bif_group_id = _scalar_from_arrays(bif_cell_arr, None, ci, 0, default=-1)
+            centroid = np.mean(profile_points, axis=0)
+            if normal_cell_arr is not None and int(ci) < int(np.asarray(normal_cell_arr).shape[0]):
+                normal_vec = unit(np.asarray(normal_cell_arr[int(ci)]).reshape(-1)[:3])
+            else:
+                _, normal_vec, _ = planar_polygon_area_and_normal(profile_points)
+                if np.linalg.norm(normal_vec) < EPS:
+                    normal_vec = pca_axes(profile_points)[0]
+                normal_vec = unit(normal_vec)
+            candidate = {
+                "profile_points": np.asarray(profile_points, dtype=float),
+                "centroid": np.asarray(centroid, dtype=float).reshape(3),
+                "normal": np.asarray(normal_vec, dtype=float).reshape(3),
+                "bifurcation_group_id": int(bif_group_id),
+            }
+            prev = result.get(int(bif_group_id))
+            if prev is None or profile_points.shape[0] > np.asarray(prev["profile_points"]).shape[0]:
+                result[int(bif_group_id)] = candidate
+        return result
+    except Exception as exc:
+        warnings.append(f"W_BIFURCATION_PROFILES_FAILED: {exc}")
+        return {}
+
+
+def build_segments_from_branch_groups(
+    grouped_centerlines: "vtkPolyData",
+    terms: List[BoundaryProfile],
+    root_term: BoundaryProfile,
+    warnings: List[str],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    group_records = extract_centerline_group_records(grouped_centerlines)
+    branch_groups = {
+        int(group_id): rec
+        for group_id, rec in group_records.items()
+        if int(rec.get("blanking", 0)) == 0 and np.asarray(rec.get("path_points", np.zeros((0, 3), dtype=float))).shape[0] >= 2
+    }
+    if not branch_groups:
+        raise RuntimeError("Branch extraction did not yield any non-blanked branch groups.")
+    bifurcations, endpoint_to_bifurcation = infer_bifurcation_participation(group_records, warnings)
+
+    root_candidates: List[Tuple[float, float, int, int]] = []
+    for group_id, rec in sorted(branch_groups.items()):
+        for end_idx in (0, 1):
+            endpoint = np.asarray(rec["endpoint_points"][int(end_idx)], dtype=float)
+            dist = float(np.linalg.norm(endpoint - np.asarray(root_term.center, dtype=float)))
+            score = float(dist / max(float(root_term.diameter_eq), 1.0))
+            root_candidates.append((score, dist, int(group_id), int(end_idx)))
+    if not root_candidates:
+        raise RuntimeError("Failed to map the root termination onto any branch-extracted centerline group.")
+    _, _, root_group_id, root_end_idx = sorted(root_candidates, key=lambda item: (item[0], item[1], item[2], item[3]))[0]
+
+    graph: Dict[int, Set[int]] = {int(group_id): set() for group_id in branch_groups}
+    junction_node_to_bif: Dict[int, int] = {}
+    next_junction_node = 1
+    for bif_group_id, bif in sorted(bifurcations.items()):
+        participants = [int(v) for v in bif.get("participating_branch_group_ids", []) if int(v) in branch_groups]
+        participants = sorted(set(participants))
+        if len(participants) < 2:
+            continue
+        junction_node = -1000000 - int(next_junction_node)
+        next_junction_node += 1
+        junction_node_to_bif[int(junction_node)] = int(bif_group_id)
+        graph.setdefault(int(junction_node), set())
+        for branch_group_id in participants:
+            graph.setdefault(int(branch_group_id), set()).add(int(junction_node))
+            graph[int(junction_node)].add(int(branch_group_id))
+
+    visited_groups: Set[int] = {int(root_group_id)}
+    parent_group_map: Dict[int, Optional[int]] = {int(root_group_id): None}
+    proximal_bifurcation_map: Dict[int, Optional[int]] = {int(root_group_id): endpoint_to_bifurcation.get((int(root_group_id), int(root_end_idx)))}
+    depth_map: Dict[int, int] = {int(root_group_id): 0}
+    bfs_queue: List[int] = [int(root_group_id)]
+    ordered_group_ids: List[int] = [int(root_group_id)]
+    while bfs_queue:
+        current_group = int(bfs_queue.pop(0))
+        for junction_node in sorted(graph.get(int(current_group), set())):
+            for neighbor_group in sorted(graph.get(int(junction_node), set())):
+                if int(neighbor_group) not in branch_groups or int(neighbor_group) in visited_groups:
+                    continue
+                visited_groups.add(int(neighbor_group))
+                parent_group_map[int(neighbor_group)] = int(current_group)
+                proximal_bifurcation_map[int(neighbor_group)] = junction_node_to_bif.get(int(junction_node))
+                depth_map[int(neighbor_group)] = int(depth_map.get(int(current_group), 0) + 1)
+                bfs_queue.append(int(neighbor_group))
+                ordered_group_ids.append(int(neighbor_group))
+    for group_id in sorted(branch_groups):
+        if int(group_id) in visited_groups:
+            continue
+        warnings.append(
+            f"W_BRANCH_TOPOLOGY_DISCONNECTED_GROUP: branch group {int(group_id)} was disconnected from the root branch topology and is treated as an auxiliary root."
+        )
+        parent_group_map[int(group_id)] = None
+        proximal_bifurcation_map[int(group_id)] = endpoint_to_bifurcation.get((int(group_id), 0))
+        depth_map[int(group_id)] = int(max(depth_map.values()) + 1 if depth_map else 0)
+        ordered_group_ids.append(int(group_id))
+        visited_groups.add(int(group_id))
+
+    ordered_defs: List[Dict[str, Any]] = []
+    oriented_cache: Dict[int, Dict[str, Any]] = {}
+    for group_id in ordered_group_ids:
+        rec = branch_groups[int(group_id)]
+        parent_group_id = parent_group_map.get(int(group_id))
+        prox_end_idx = int(root_end_idx) if int(group_id) == int(root_group_id) else 0
+        prox_bif_id = proximal_bifurcation_map.get(int(group_id))
+        if int(group_id) != int(root_group_id):
+            matching_ends = [end_idx for end_idx in (0, 1) if endpoint_to_bifurcation.get((int(group_id), int(end_idx))) == prox_bif_id]
+            if len(matching_ends) == 1:
+                prox_end_idx = int(matching_ends[0])
+            elif len(matching_ends) >= 2 and prox_bif_id in bifurcations:
+                bif_centroid = np.asarray(bifurcations[int(prox_bif_id)]["centroid"], dtype=float)
+                d0 = float(np.linalg.norm(np.asarray(rec["endpoint_points"][0], dtype=float) - bif_centroid))
+                d1 = float(np.linalg.norm(np.asarray(rec["endpoint_points"][1], dtype=float) - bif_centroid))
+                prox_end_idx = 0 if d0 <= d1 else 1
+            elif parent_group_id is not None and int(parent_group_id) in oriented_cache:
+                parent_points = np.asarray(oriented_cache[int(parent_group_id)]["path_points"], dtype=float)
+                d0 = point_to_polyline_distance(np.asarray(rec["endpoint_points"][0], dtype=float), parent_points, closed=False)
+                d1 = point_to_polyline_distance(np.asarray(rec["endpoint_points"][1], dtype=float), parent_points, closed=False)
+                prox_end_idx = 0 if d0 <= d1 else 1
+        distal_original_end_idx = 1 - int(prox_end_idx)
+        if int(prox_end_idx) == 1:
+            node_path = list(reversed(rec["path_node_ids"]))
+            path_points = np.asarray(rec["path_points"], dtype=float)[::-1]
+            path_radii = None if rec["path_radii"] is None else np.asarray(rec["path_radii"], dtype=float)[::-1]
+        else:
+            node_path = list(rec["path_node_ids"])
+            path_points = np.asarray(rec["path_points"], dtype=float)
+            path_radii = None if rec["path_radii"] is None else np.asarray(rec["path_radii"], dtype=float)
+        oriented_def = {
+            "group_id": int(group_id),
+            "parent_group_id": (None if parent_group_id is None else int(parent_group_id)),
+            "proximal_bifurcation_group_id": (None if prox_bif_id is None else int(prox_bif_id)),
+            "distal_bifurcation_group_id": endpoint_to_bifurcation.get((int(group_id), int(distal_original_end_idx))),
+            "node_path_oriented": [int(v) for v in node_path],
+            "path_points_oriented": np.asarray(path_points, dtype=float),
+            "path_radii_oriented": (None if path_radii is None else np.asarray(path_radii, dtype=float)),
+            "length": float(polyline_length(path_points)),
+            "warnings": [],
+            "supernode_proximal": int(2 * int(group_id) + int(prox_end_idx)),
+            "supernode_distal": int(2 * int(group_id) + int(distal_original_end_idx)),
+            "proximal_terminal_term": None,
+            "distal_terminal_term": None,
+        }
+        oriented_cache[int(group_id)] = {
+            "path_points": np.asarray(path_points, dtype=float),
+            "proximal_point": np.asarray(path_points[0], dtype=float),
+            "distal_point": np.asarray(path_points[-1], dtype=float),
+        }
+        ordered_defs.append(oriented_def)
+
+    group_to_segment_id = {int(rec["group_id"]): int(idx) for idx, rec in enumerate(ordered_defs, start=1)}
+    ordered_segments: List[Dict[str, Any]] = []
+    for idx, rec in enumerate(ordered_defs, start=1):
+        ordered_segments.append(
+            {
+                "segment_id": int(idx),
+                "group_id": int(rec["group_id"]),
+                "centerline_group_id": int(rec["group_id"]),
+                "parent_group_id": rec["parent_group_id"],
+                "proximal_bifurcation_group_id": rec["proximal_bifurcation_group_id"],
+                "distal_bifurcation_group_id": rec["distal_bifurcation_group_id"],
+                "supernode_proximal": int(rec["supernode_proximal"]),
+                "supernode_distal": int(rec["supernode_distal"]),
+                "node_path_oriented": [int(v) for v in rec["node_path_oriented"]],
+                "path_points_oriented": np.asarray(rec["path_points_oriented"], dtype=float),
+                "path_radii_oriented": (None if rec["path_radii_oriented"] is None else np.asarray(rec["path_radii_oriented"], dtype=float)),
+                "length": float(rec["length"]),
+                "warnings": list(rec["warnings"]),
+                "parent_segment_id": (None if rec["parent_group_id"] is None else int(group_to_segment_id[int(rec["parent_group_id"])])),
+                "child_segment_ids": [],
+                "proximal_terminal_term": rec["proximal_terminal_term"],
+                "distal_terminal_term": rec["distal_terminal_term"],
+            }
+        )
+    segment_lookup = {int(seg["segment_id"]): seg for seg in ordered_segments}
+    for seg in ordered_segments:
+        parent_id = seg.get("parent_segment_id")
+        if parent_id is not None and int(parent_id) in segment_lookup:
+            segment_lookup[int(parent_id)]["child_segment_ids"].append(int(seg["segment_id"]))
+    for seg in ordered_segments:
+        seg["child_segment_ids"] = sorted(int(v) for v in seg.get("child_segment_ids", []))
+        path_radii = seg.get("path_radii_oriented")
+        seg["mean_radius"] = max(
+            float(np.nanmedian(path_radii)) if path_radii is not None and np.asarray(path_radii).size > 0 else max(float(seg["length"]) * 0.05, 1.0),
+            1.0,
+        )
+
+    root_segment = next((seg for seg in ordered_segments if int(seg["group_id"]) == int(root_group_id)), ordered_segments[0])
+    root_segment["proximal_terminal_term"] = root_term
+
+    endpoint_candidates: List[Dict[str, Any]] = []
+    for seg in ordered_segments:
+        if seg.get("distal_bifurcation_group_id") is None:
+            endpoint_candidates.append(
+                {
+                    "segment_id": int(seg["segment_id"]),
+                    "side": "distal",
+                    "point": np.asarray(seg["path_points_oriented"][-1], dtype=float),
+                    "radius": float(max(seg.get("mean_radius", 1.0), 1.0)),
+                }
+            )
+        if seg["parent_segment_id"] is None and int(seg["segment_id"]) != int(root_segment["segment_id"]) and seg.get("proximal_bifurcation_group_id") is None:
+            endpoint_candidates.append(
+                {
+                    "segment_id": int(seg["segment_id"]),
+                    "side": "proximal",
+                    "point": np.asarray(seg["path_points_oriented"][0], dtype=float),
+                    "radius": float(max(seg.get("mean_radius", 1.0), 1.0)),
+                }
+            )
+
+    unmatched_terms = [term for term in terms if term is not root_term]
+    pairs: List[Tuple[float, float, int, int]] = []
+    for term_idx, term in enumerate(unmatched_terms):
+        for endpoint_idx, endpoint in enumerate(endpoint_candidates):
+            dist = float(np.linalg.norm(np.asarray(endpoint["point"], dtype=float) - np.asarray(term.center, dtype=float)))
+            score = dist / max(float(term.diameter_eq), float(2.0 * endpoint["radius"]), 1.0)
+            pairs.append((float(score), float(dist), int(term_idx), int(endpoint_idx)))
+    used_terms: Set[int] = set()
+    used_endpoints: Set[int] = set()
+    for _, _, term_idx, endpoint_idx in sorted(pairs, key=lambda item: (item[0], item[1], item[2], item[3])):
+        if int(term_idx) in used_terms or int(endpoint_idx) in used_endpoints:
+            continue
+        term = unmatched_terms[int(term_idx)]
+        endpoint = endpoint_candidates[int(endpoint_idx)]
+        seg = segment_lookup[int(endpoint["segment_id"])]
+        if str(endpoint["side"]) == "distal":
+            seg["distal_terminal_term"] = term
+        else:
+            seg["proximal_terminal_term"] = term
+        used_terms.add(int(term_idx))
+        used_endpoints.add(int(endpoint_idx))
+    for term_idx, term in enumerate(unmatched_terms):
+        if int(term_idx) not in used_terms:
+            warnings.append(f"W_BRANCH_TERMINAL_MAPPING_FAILED: failed to map termination '{term.source}' onto a branch-extracted segment endpoint.")
+
+    topology_info = {
+        "group_count_nonblanked": int(len(branch_groups)),
+        "bifurcation_group_count": int(len(bifurcations)),
+        "root_group_id": int(root_group_id),
+    }
+    return ordered_segments, topology_info
+
+
+# FALLBACK ONLY: used when vtkvmtkPolyDataBranchExtractor is unavailable.
 def build_graph_from_polyline_centerlines(cl: "vtkPolyData") -> Tuple[Dict[int, Dict[int, float]], np.ndarray, List[int]]:
     pts = get_points_numpy(cl)
     adjacency: Dict[int, Dict[int, float]] = {}
@@ -1648,6 +2729,7 @@ def edge_key(a: int, b: int) -> Tuple[int, int]:
     return (aa, bb) if aa <= bb else (bb, aa)
 
 
+# FALLBACK ONLY: used when vtkvmtkPolyDataBranchExtractor is unavailable.
 def build_branch_chains_from_graph(adjacency: Dict[int, Dict[int, float]]) -> List[List[int]]:
     if not adjacency:
         return []
@@ -1837,6 +2919,7 @@ def map_terminations_to_centerline_endpoints(
     return mapping
 
 
+# FALLBACK ONLY: used when vtkvmtkPolyDataBranchExtractor is unavailable.
 def collapse_junction_clusters(
     adjacency: Dict[int, Dict[int, float]],
     pts: np.ndarray,
@@ -1887,6 +2970,7 @@ def collapse_junction_clusters(
     return supernode_for_keynode, chains, cluster_members, deg
 
 
+# FALLBACK ONLY: used when vtkvmtkPolyDataBranchExtractor is unavailable.
 def build_supernode_graph_and_segments(
     chains: List[List[int]],
     supernode_for_keynode: Dict[int, int],
@@ -2140,6 +3224,7 @@ def point_to_polyline_distance(point: np.ndarray, polyline_points: np.ndarray, c
     return float(best)
 
 
+# DEMOTED: fallback only
 def detect_stable_transition_zone(
     samples: List[Dict[str, Any]],
     scores: np.ndarray,
@@ -2259,6 +3344,7 @@ def concatenate_segment_radii(parent_radii: Optional[np.ndarray], child_radii: O
     return np.concatenate([a, b[1:] if b.size > 1 else b]).astype(float)
 
 
+# DEMOTED: fallback only
 def plane_section_candidates(
     surface: "vtkPolyData",
     plane_origin: np.ndarray,
@@ -2366,6 +3452,7 @@ def path_local_axis_stability(path_points: np.ndarray, abscissa: float, lookahea
     return float(clamp(sum(vals) / max(len(vals), 1), 0.0, 1.0))
 
 
+# DEMOTED: fallback only
 def build_section_sample(
     surface: "vtkPolyData",
     family: str,
@@ -2476,6 +3563,7 @@ def build_section_sample(
     }
 
 
+# DEMOTED: fallback only
 def sample_section_family(
     surface: "vtkPolyData",
     family: str,
@@ -2514,6 +3602,7 @@ def sample_section_family(
     return samples
 
 
+# DEMOTED: fallback only
 def moving_average(values: List[float], window: int) -> List[float]:
     arr = np.asarray(values, dtype=float)
     if arr.size == 0:
@@ -2527,6 +3616,7 @@ def moving_average(values: List[float], window: int) -> List[float]:
     return out
 
 
+# DEMOTED: fallback only
 def profile_scores_from_samples(samples: List[Dict[str, Any]]) -> Dict[str, np.ndarray]:
     n = len(samples)
     if n == 0:
@@ -2731,12 +3821,166 @@ def synthetic_transition_boundary(
     )
 
 
+def classify_junction_type(
+    parent_seg: Dict[str, Any],
+    child_seg: Dict[str, Any],
+    all_segments: List[Dict[str, Any]],
+    grouped_centerlines: "vtkPolyData",
+    warnings: List[str],
+) -> str:
+    parent_radius = max(float(parent_seg.get("mean_radius", 1.0)), 1.0)
+    child_radius = max(float(child_seg.get("mean_radius", 1.0)), 0.0)
+    ratio = float(child_radius / parent_radius) if parent_radius > EPS else 0.0
+    if ratio < 0.55:
+        return "side_branch"
+    child_ids = [int(v) for v in parent_seg.get("child_segment_ids", [])]
+    if len(child_ids) == 2:
+        lookup = {int(seg["segment_id"]): seg for seg in all_segments}
+        ratios: List[float] = []
+        for child_id in child_ids:
+            seg = lookup.get(int(child_id))
+            if seg is None:
+                continue
+            ratios.append(float(max(float(seg.get("mean_radius", 1.0)), 0.0) / parent_radius))
+        if len(ratios) == 2 and min(ratios) > 0.45:
+            return "bifurcation"
+    return "side_branch"
+
+
+def build_transition_interface_from_contour_geometry(
+    parent_seg: Dict[str, Any],
+    child_seg: Dict[str, Any],
+    contour_points: np.ndarray,
+    contour_normal: np.ndarray,
+    method_tag: str,
+    junction_type: str,
+    representative_child_abscissa: float,
+    parent_projection_abscissa: Optional[float],
+    confidence: float,
+    connection_zone_score: float,
+    child_window: float,
+    parent_window: float,
+    local_spacing: float,
+    radius_hint: float,
+    warnings: Optional[List[str]] = None,
+    contour_quality: float = 0.0,
+    axis_stability: float = 0.0,
+    synthetic: bool = False,
+    low_confidence: bool = False,
+    stable_zone_start_abscissa: Optional[float] = None,
+    stable_zone_end_abscissa: Optional[float] = None,
+) -> Tuple[BoundaryProfile, TransitionInterface]:
+    child_path = np.asarray(child_seg["path_points_oriented"], dtype=float)
+    parent_path = np.asarray(parent_seg["path_points_oriented"], dtype=float)
+    child_radii = child_seg.get("path_radii_oriented")
+    parent_radii = parent_seg.get("path_radii_oriented")
+    child_len = float(polyline_length(child_path))
+    rep_child_s = float(clamp(float(representative_child_abscissa), 0.0, child_len))
+    child_tangent = polyline_tangent_at_abscissa(child_path, rep_child_s)
+    if parent_projection_abscissa is None:
+        parent_projection = project_point_to_polyline(np.mean(np.asarray(contour_points, dtype=float), axis=0), parent_path)
+        parent_projection_abscissa = None if parent_projection is None else float(parent_projection["abscissa"])
+    if parent_projection_abscissa is None:
+        parent_projection_abscissa = float(polyline_length(parent_path))
+    parent_projection_abscissa = float(clamp(float(parent_projection_abscissa), 0.0, float(polyline_length(parent_path))))
+    parent_projection_point = polyline_point_at_abscissa(parent_path, parent_projection_abscissa)
+    contour_np = np.asarray(contour_points, dtype=float)
+    if contour_np.shape[0] < 2:
+        contour_np = make_circle_points(
+            center=polyline_point_at_abscissa(child_path, rep_child_s),
+            normal=child_tangent,
+            radius=max(float(radius_hint), 1.0),
+            n_points=32,
+        )
+    profile = boundary_profile_from_contour(
+        contour_points=contour_np,
+        normal_hint=np.asarray(contour_normal if np.linalg.norm(np.asarray(contour_normal, dtype=float)) > EPS else child_tangent, dtype=float),
+        source=f"segment_{int(child_seg['segment_id'])}_proximal_{method_tag}",
+        boundary_type="junction_profile",
+        boundary_method=method_tag,
+        confidence=float(confidence),
+        connection_zone_score=float(connection_zone_score),
+        fallback_used=bool(low_confidence or synthetic),
+        synthetic=bool(synthetic),
+        parent_projection_point=np.asarray(parent_projection_point, dtype=float),
+        parent_projection_abscissa=float(parent_projection_abscissa),
+        warnings=list(warnings or []),
+    )
+    if float(profile.diameter_eq) <= EPS:
+        profile.area = float(math.pi * max(float(radius_hint), 1.0) ** 2)
+        profile.diameter_eq = float(2.0 * max(float(radius_hint), 1.0))
+    profile = orient_boundary_normal(profile, child_tangent)
+    child_local_radius = path_radius_at_abscissa(child_path, child_radii, rep_child_s, max(float(child_seg.get("mean_radius", 1.0)), 1.0))
+    parent_local_radius = path_radius_at_abscissa(parent_path, parent_radii, parent_projection_abscissa, max(float(parent_seg.get("mean_radius", 1.0)), 1.0))
+    partition_normal, axis_u, axis_v = transition_partition_frame(profile.center, profile.normal, parent_projection_point)
+    interface = TransitionInterface(
+        interface_id=-1,
+        child_segment_id=int(child_seg["segment_id"]),
+        parent_segment_id=int(parent_seg["segment_id"]),
+        contour_points=np.asarray(profile.profile_points, dtype=float),
+        contour_centroid=np.asarray(profile.center, dtype=float),
+        contour_normal=np.asarray(profile.normal, dtype=float),
+        parent_projection_point=np.asarray(parent_projection_point, dtype=float),
+        parent_projection_abscissa=float(parent_projection_abscissa),
+        partition_normal=np.asarray(partition_normal, dtype=float),
+        partition_axis_u=np.asarray(axis_u, dtype=float),
+        partition_axis_v=np.asarray(axis_v, dtype=float),
+        confidence=float(clamp(confidence, 0.0, 1.0)),
+        connection_zone_score=float(clamp(connection_zone_score, 0.0, 1.0)),
+        method_tag=str(method_tag),
+        junction_type=str(junction_type),
+        representative_child_abscissa=float(rep_child_s),
+        stable_zone_start_abscissa=float(rep_child_s if stable_zone_start_abscissa is None else stable_zone_start_abscissa),
+        stable_zone_end_abscissa=float(rep_child_s if stable_zone_end_abscissa is None else stable_zone_end_abscissa),
+        stable_zone_start_index=-1,
+        stable_zone_end_index=-1,
+        representative_index=-1,
+        local_spacing=float(max(local_spacing, 0.12)),
+        child_window=float(max(child_window, 0.5)),
+        parent_window=float(max(parent_window, 0.5)),
+        patch_radius=float(max(1.35 * max(profile.diameter_eq, 2.0 * radius_hint), 2.25 * max(child_local_radius, parent_local_radius, radius_hint, 1.0), 3.0 * max(local_spacing, 0.12))),
+        child_radius=float(max(child_local_radius, 1.0)),
+        parent_radius=float(max(parent_local_radius, 1.0)),
+        contour_quality=float(contour_quality),
+        axis_stability=float(axis_stability),
+        synthetic=bool(synthetic),
+        low_confidence=bool(low_confidence),
+        local_partition_mode="pending",
+        warnings=list(warnings or []),
+    )
+    return profile, interface
+
+
+def match_bifurcation_section_for_child(
+    parent_seg: Dict[str, Any],
+    child_seg: Dict[str, Any],
+    bifurcation_sections: Dict[Tuple[int, int], Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    parent_group_id = parent_seg.get("group_id")
+    child_group_id = child_seg.get("group_id")
+    proximal_bif_group_id = child_seg.get("proximal_bifurcation_group_id")
+    direct = bifurcation_sections.get((int(parent_group_id), int(child_group_id))) if parent_group_id is not None and child_group_id is not None else None
+    if direct is not None:
+        return direct
+    for _, section in sorted(bifurcation_sections.items(), key=lambda item: (int(item[0][0]), int(item[0][1]))):
+        if child_group_id is not None and int(section.get("group_id", -1)) != int(child_group_id):
+            continue
+        if proximal_bif_group_id is not None and "bifurcation_group_id" in section and int(section["bifurcation_group_id"]) not in (int(proximal_bif_group_id), int(parent_group_id) if parent_group_id is not None else int(proximal_bif_group_id)):
+            continue
+        return section
+    return None
+
+
 def refine_child_proximal_boundary(
     surface: "vtkPolyData",
     parent_seg: Dict[str, Any],
     child_seg: Dict[str, Any],
     resampling_step: float,
     warnings: List[str],
+    junction_type: str = "side_branch",
+    bifurcation_reference_points: Optional[Dict[int, Dict[str, Any]]] = None,
+    bifurcation_sections: Optional[Dict[Tuple[int, int], Dict[str, Any]]] = None,
+    bifurcation_profiles: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> Tuple[BoundaryProfile, Dict[str, Any], List[Dict[str, Any]], Optional[TransitionInterface]]:
     child_path = np.asarray(child_seg["path_points_oriented"], dtype=float)
     parent_path = np.asarray(parent_seg["path_points_oriented"], dtype=float)
@@ -2758,11 +4002,121 @@ def refine_child_proximal_boundary(
     parent_spacing = local_interface_spacing(parent_anchor_radius, resampling_step, contour_quality=0.75, axis_stability=parent_axis0)
     child_window = local_interface_window(daughter_radius, child_len, child_spacing, contour_quality=0.75, axis_stability=child_axis0, role="child")
     parent_window = local_interface_window(parent_anchor_radius, parent_len, parent_spacing, contour_quality=0.75, axis_stability=parent_axis0, role="parent")
-    child_start_s = min(0.35 * child_spacing, 0.10 * max(daughter_diam, 1.0))
-    child_end_s = clamp(child_window, child_start_s + 0.5 * child_spacing, child_len)
+    proximal_bif_group_id = child_seg.get("proximal_bifurcation_group_id")
+    reference_info = None if bifurcation_reference_points is None or proximal_bif_group_id is None else bifurcation_reference_points.get(int(proximal_bif_group_id))
+    section_choice = None if not bifurcation_sections else match_bifurcation_section_for_child(parent_seg, child_seg, bifurcation_sections)
+    profile_choice = None if not bifurcation_profiles or proximal_bif_group_id is None else bifurcation_profiles.get(int(proximal_bif_group_id))
+    preferred_geometry: List[Tuple[str, Optional[Dict[str, Any]]]] = (
+        [("vmtk_bifurcation_profile", profile_choice), ("vmtk_bifurcation_section", section_choice)]
+        if str(junction_type) == "bifurcation"
+        else [("vmtk_bifurcation_section", section_choice), ("vmtk_bifurcation_profile", profile_choice)]
+    )
+    for method_tag, geometry in preferred_geometry:
+        if geometry is None or child_len <= EPS or parent_len <= EPS:
+            continue
+        if method_tag == "vmtk_bifurcation_profile":
+            contour_points = np.asarray(geometry.get("profile_points", np.zeros((0, 3), dtype=float)), dtype=float)
+            contour_normal = np.asarray(geometry.get("normal", polyline_tangent_at_abscissa(child_path, 0.0)), dtype=float)
+            radius_hint = float(reference_info.get("upstream_radius", daughter_radius)) if reference_info is not None else float(daughter_radius)
+            contour_conf = 0.85
+        else:
+            contour_points = np.asarray(geometry.get("contour_points", np.zeros((0, 3), dtype=float)), dtype=float)
+            contour_normal = np.asarray(geometry.get("normal", polyline_tangent_at_abscissa(child_path, 0.0)), dtype=float)
+            radius_hint = float(max(geometry.get("radius", daughter_radius), 1.0))
+            contour_conf = float(geometry.get("quality_score", 0.85))
+        if contour_points.shape[0] < 2:
+            continue
+        contour_centroid = np.asarray(np.mean(contour_points, axis=0), dtype=float)
+        child_proj = project_point_to_polyline(contour_centroid, child_path)
+        parent_proj = project_point_to_polyline(contour_centroid, parent_path)
+        rep_child_s = float(child_proj["abscissa"]) if child_proj is not None else 0.0
+        parent_proj_s = float(parent_proj["abscissa"]) if parent_proj is not None else float(parent_len)
+        if reference_info is not None:
+            rep_child_s = float(project_point_to_polyline(np.asarray(reference_info["reference_point"], dtype=float), child_path)["abscissa"])
+            parent_proj_s = float(project_point_to_polyline(np.asarray(reference_info["reference_point"], dtype=float), parent_path)["abscissa"])
+            radius_hint = max(float(reference_info.get("upstream_radius", radius_hint)), float(radius_hint), 1.0)
+        local_spacing = min(child_spacing, parent_spacing)
+        child_window_local = float(max(3.0 * radius_hint, child_spacing))
+        parent_window_local = float(max(3.0 * radius_hint, parent_spacing))
+        profile, interface = build_transition_interface_from_contour_geometry(
+            parent_seg=parent_seg,
+            child_seg=child_seg,
+            contour_points=contour_points,
+            contour_normal=contour_normal,
+            method_tag=method_tag,
+            junction_type=junction_type,
+            representative_child_abscissa=float(rep_child_s),
+            parent_projection_abscissa=float(parent_proj_s),
+            confidence=float(contour_conf),
+            connection_zone_score=float(contour_conf),
+            child_window=float(child_window_local),
+            parent_window=float(parent_window_local),
+            local_spacing=float(local_spacing),
+            radius_hint=float(radius_hint),
+            warnings=[],
+            contour_quality=float(contour_conf),
+            axis_stability=float(path_local_axis_stability(child_path, rep_child_s, lookahead=max(radius_hint, resampling_step))),
+            low_confidence=bool(contour_conf < 0.5),
+            stable_zone_start_abscissa=float(max(rep_child_s - 0.5 * child_spacing, 0.0)),
+            stable_zone_end_abscissa=float(min(rep_child_s + 0.5 * child_spacing, child_len)),
+        )
+        debug_family = "vmtk_bifurcation_profile" if method_tag == "vmtk_bifurcation_profile" else "vmtk_bifurcation_section"
+        debug_records = [
+            {
+                "segment_id": int(child_seg["segment_id"]),
+                "parent_segment_id": int(parent_seg["segment_id"]),
+                "family": debug_family,
+                "sample_index": 0,
+                "sample_abscissa": float(rep_child_s),
+                "score": float(contour_conf),
+                "quality": float(contour_conf),
+                "candidate_count": int(contour_points.shape[0]),
+                "chosen": 1,
+                "profile_points": np.asarray(contour_points, dtype=float),
+                "center": np.asarray(profile.center, dtype=float),
+                "normal": np.asarray(profile.normal, dtype=float),
+                "section_source": ("vmtk_profile" if method_tag == "vmtk_bifurcation_profile" else "vmtk_section"),
+            }
+        ]
+        return profile, {
+            "success": True,
+            "parent_event_abscissa": float(parent_proj_s),
+            "parent_event_score": float(contour_conf),
+            "parent_projection_point": np.asarray(profile.parent_projection_point, dtype=float),
+            "child_best_score": float(contour_conf),
+            "child_best_abscissa": float(rep_child_s),
+            "daughter_ref_area": float(profile.area),
+            "parent_ref_area": float(profile.area),
+            "child_spacing": float(child_spacing),
+            "parent_spacing": float(parent_spacing),
+            "stable_zone_score": float(contour_conf),
+            "stable_zone_start_abscissa": interface.stable_zone_start_abscissa,
+            "stable_zone_end_abscissa": interface.stable_zone_end_abscissa,
+        }, debug_records, interface
+
+    if proximal_bif_group_id is not None and reference_info is None:
+        warnings.append(
+            f"W_BIFURCATION_REFERENCE_MISSING_FALLBACK: segment {int(child_seg['segment_id'])} junction {int(proximal_bif_group_id)} used heuristic search windows."
+        )
+    if reference_info is not None:
+        reference_point = np.asarray(reference_info["reference_point"], dtype=float)
+        local_radius = max(float(reference_info.get("upstream_radius", daughter_radius)), 1.0)
+        child_ref_proj = project_point_to_polyline(reference_point, child_path)
+        parent_ref_proj = project_point_to_polyline(reference_point, parent_path)
+        child_ref_s = float(child_ref_proj["abscissa"]) if child_ref_proj is not None else 0.0
+        parent_ref_s = float(parent_ref_proj["abscissa"]) if parent_ref_proj is not None else float(parent_len)
+        child_window = float(max(3.0 * local_radius, child_spacing))
+        parent_window = float(max(3.0 * local_radius, parent_spacing))
+        child_start_s = float(clamp(child_ref_s, 0.0, child_len))
+        child_end_s = float(clamp(child_ref_s + child_window, child_start_s + 0.5 * child_spacing, child_len))
+        parent_start_s = float(clamp(parent_ref_s - parent_window, 0.0, parent_len))
+        parent_end_s = float(clamp(parent_ref_s + parent_window, parent_start_s + 0.5 * parent_spacing, parent_len))
+    else:
+        child_start_s = min(0.35 * child_spacing, 0.10 * max(daughter_diam, 1.0))
+        child_end_s = clamp(child_window, child_start_s + 0.5 * child_spacing, child_len)
+        parent_start_s = clamp(parent_len - parent_window, 0.0, parent_len)
+        parent_end_s = clamp(parent_len - 0.35 * parent_spacing, parent_start_s, parent_len)
     child_samples_s = sample_abscissae(child_start_s, child_end_s, child_spacing)
-    parent_start_s = clamp(parent_len - parent_window, 0.0, parent_len)
-    parent_end_s = clamp(parent_len - 0.35 * parent_spacing, parent_start_s, parent_len)
     parent_samples_s = sample_abscissae(parent_start_s, parent_end_s, parent_spacing)
 
     if child_len <= EPS or parent_len <= EPS:
@@ -2792,7 +4146,8 @@ def refine_child_proximal_boundary(
             partition_axis_v=np.asarray(axis_v, dtype=float),
             confidence=float(synthetic.confidence),
             connection_zone_score=0.0,
-            method_tag="synthetic_degenerate_interface",
+            method_tag="geodesic_refined",
+            junction_type=str(junction_type),
             representative_child_abscissa=0.0,
             stable_zone_start_abscissa=0.0,
             stable_zone_end_abscissa=0.0,
@@ -2949,7 +4304,8 @@ def refine_child_proximal_boundary(
             partition_axis_v=np.asarray(axis_v, dtype=float),
             confidence=float(synthetic.confidence),
             connection_zone_score=0.0,
-            method_tag="synthetic_low_confidence_interface",
+            method_tag="geodesic_refined",
+            junction_type=str(junction_type),
             representative_child_abscissa=float(child_start_s),
             stable_zone_start_abscissa=float(child_start_s),
             stable_zone_end_abscissa=float(child_start_s),
@@ -3171,7 +4527,8 @@ def refine_child_proximal_boundary(
         partition_axis_v=np.asarray(axis_v, dtype=float),
         confidence=float(chosen_profile.confidence),
         connection_zone_score=float(best_score),
-        method_tag="refined_parent_daughter_interface",
+        method_tag="geodesic_refined",
+        junction_type=str(junction_type),
         representative_child_abscissa=float(best_sample["abscissa"]),
         stable_zone_start_abscissa=(float(child_samples[int(zone["start_index"])]["abscissa"]) if int(zone["start_index"]) >= 0 else float(best_sample["abscissa"])),
         stable_zone_end_abscissa=(float(child_samples[int(zone["end_index"])]["abscissa"]) if int(zone["end_index"]) >= 0 else float(best_sample["abscissa"])),
@@ -3385,6 +4742,8 @@ def build_section_debug_polydata(records: List[Dict[str, Any]]) -> "vtkPolyData"
     chosen_arr.SetName("Chosen")
     stable_arr = vtk.vtkIntArray()
     stable_arr.SetName("StableZoneMember")
+    source_arr = vtk.vtkStringArray()
+    source_arr.SetName("SectionSource")
 
     for rec in records:
         pts_np = np.asarray(rec["profile_points"], dtype=float)
@@ -3406,6 +4765,16 @@ def build_section_debug_polydata(records: List[Dict[str, Any]]) -> "vtkPolyData"
         count_arr.InsertNextValue(int(rec.get("candidate_count", 0)))
         chosen_arr.InsertNextValue(int(bool(rec.get("chosen", False))))
         stable_arr.InsertNextValue(int(bool(rec.get("stable_zone_member", False))))
+        section_source = rec.get("section_source")
+        if section_source is None:
+            family = str(rec.get("family", ""))
+            if family == "vmtk_bifurcation_section":
+                section_source = "vmtk_section"
+            elif family == "vmtk_bifurcation_profile":
+                section_source = "vmtk_profile"
+            else:
+                section_source = "heuristic"
+        source_arr.InsertNextValue(str(section_source))
 
     out = vtk.vtkPolyData()
     out.SetPoints(points)
@@ -3420,6 +4789,7 @@ def build_section_debug_polydata(records: List[Dict[str, Any]]) -> "vtkPolyData"
     out.GetCellData().AddArray(count_arr)
     out.GetCellData().AddArray(chosen_arr)
     out.GetCellData().AddArray(stable_arr)
+    out.GetCellData().AddArray(source_arr)
     return out
 
 
@@ -3553,7 +4923,7 @@ def segment_relative_distance(
     return rel, float(proj["abscissa"]), float(radius)
 
 
-def partition_transition_interface_on_surface(
+def _partition_transition_interface_plane_fallback(
     centers: np.ndarray,
     adjacency: List[List[int]],
     interface: TransitionInterface,
@@ -3756,6 +5126,159 @@ def partition_transition_interface_on_surface(
         "patch_cells": sorted(int(v) for v in patch_set),
         "barrier_cells": sorted(int(v) for v in barrier_cells),
     }
+
+
+def _multi_source_dijkstra_distances(
+    adjacency: Dict[int, Dict[int, float]],
+    seeds: Set[int],
+) -> Dict[int, float]:
+    if not seeds:
+        return {}
+    temp_adj: Dict[int, Dict[int, float]] = {int(node): {int(nei): float(weight) for nei, weight in neighbors.items()} for node, neighbors in adjacency.items()}
+    super_source = min(temp_adj.keys(), default=0) - 1
+    temp_adj[int(super_source)] = {}
+    for seed in sorted(int(v) for v in seeds):
+        temp_adj.setdefault(int(seed), {})
+        temp_adj[int(super_source)][int(seed)] = 0.0
+        temp_adj[int(seed)][int(super_source)] = 0.0
+    dist, _ = dijkstra_shortest_paths(temp_adj, int(super_source))
+    dist.pop(int(super_source), None)
+    return {int(node): float(value) for node, value in dist.items()}
+
+
+def partition_transition_interface_on_surface(
+    centers: np.ndarray,
+    adjacency: List[List[int]],
+    interface: TransitionInterface,
+    segment_lookup: Dict[int, Dict[str, Any]],
+    surface: Optional["vtkPolyData"] = None,
+) -> Dict[str, Any]:
+    try:
+        child_seg = segment_lookup.get(int(interface.child_segment_id))
+        parent_seg = segment_lookup.get(int(interface.parent_segment_id))
+        if child_seg is None or parent_seg is None:
+            raise RuntimeError("missing_segments")
+
+        child_path = np.asarray(child_seg["path_points_oriented"], dtype=float)
+        parent_path = np.asarray(parent_seg["path_points_oriented"], dtype=float)
+        patch_radius = max(float(interface.patch_radius), 2.0 * max(float(interface.child_radius), float(interface.parent_radius), 1.0))
+        contour_centroid = np.asarray(interface.contour_centroid, dtype=float).reshape(3)
+        patch_cells = [
+            int(ci)
+            for ci, center in enumerate(np.asarray(centers, dtype=float))
+            if float(np.linalg.norm(np.asarray(center, dtype=float) - contour_centroid)) <= float(patch_radius)
+        ]
+        if not patch_cells:
+            raise RuntimeError("empty_patch")
+        if surface is not None:
+            _ = polydata_from_cell_ids(surface, patch_cells)
+        patch_set = {int(v) for v in patch_cells}
+        local_adj: Dict[int, Dict[int, float]] = {}
+        for ci in sorted(patch_set):
+            for nei in adjacency[int(ci)]:
+                nei = int(nei)
+                if nei not in patch_set:
+                    continue
+                w = float(np.linalg.norm(np.asarray(centers[int(ci)], dtype=float) - np.asarray(centers[int(nei)], dtype=float)))
+                if w <= EPS:
+                    continue
+                local_adj.setdefault(int(ci), {})[int(nei)] = float(w)
+        if not local_adj:
+            raise RuntimeError("patch_adjacency_empty")
+
+        representative_child_abscissa = 0.0 if interface.representative_child_abscissa is None else float(interface.representative_child_abscissa)
+        parent_projection_abscissa = float(polyline_length(parent_path)) if interface.parent_projection_abscissa is None else float(interface.parent_projection_abscissa)
+        parent_seed_start = max(parent_projection_abscissa - max(float(interface.parent_window), float(interface.local_spacing)), 0.0)
+        parent_seed_end = min(parent_projection_abscissa + 0.5 * max(float(interface.local_spacing), 0.12), float(polyline_length(parent_path)))
+        child_seed_end = max(float(representative_child_abscissa), 0.0)
+
+        parent_seeds: Set[int] = set()
+        child_seeds: Set[int] = set()
+        for ci in sorted(patch_set):
+            center = np.asarray(centers[int(ci)], dtype=float)
+            parent_proj = distance_to_prepared_polyline(center, parent_seg["projection"])
+            child_proj = distance_to_prepared_polyline(center, child_seg["projection"])
+            if float(parent_proj["abscissa"]) >= parent_seed_start and float(parent_proj["abscissa"]) <= parent_seed_end:
+                parent_seeds.add(int(ci))
+            if float(child_proj["abscissa"]) >= 0.0 and float(child_proj["abscissa"]) <= child_seed_end + 1e-9:
+                child_seeds.add(int(ci))
+        if not parent_seeds or not child_seeds:
+            raise RuntimeError("seed_set_empty")
+
+        dist_parent = _multi_source_dijkstra_distances(local_adj, parent_seeds)
+        dist_child = _multi_source_dijkstra_distances(local_adj, child_seeds)
+        if not dist_parent or not dist_child:
+            raise RuntimeError("dijkstra_failed")
+
+        local_labels: Dict[int, int] = {}
+        child_cells: Set[int] = set()
+        parent_cells: Set[int] = set()
+        for ci in sorted(patch_set):
+            dp = float(dist_parent.get(int(ci), float("inf")))
+            dc = float(dist_child.get(int(ci), float("inf")))
+            if not math.isfinite(dp) and not math.isfinite(dc):
+                continue
+            if dp <= dc:
+                local_labels[int(ci)] = int(interface.parent_segment_id)
+                parent_cells.add(int(ci))
+            else:
+                local_labels[int(ci)] = int(interface.child_segment_id)
+                child_cells.add(int(ci))
+        if not parent_cells or not child_cells:
+            raise RuntimeError("one_sided_partition")
+
+        barrier_cells: Set[int] = set()
+        blocked_edges: Set[Tuple[int, int]] = set()
+        for ci in sorted(patch_set):
+            for nei in adjacency[int(ci)]:
+                nei = int(nei)
+                if nei not in patch_set:
+                    continue
+                li = local_labels.get(int(ci), -1)
+                lj = local_labels.get(int(nei), -1)
+                if li >= 0 and lj >= 0 and li != lj:
+                    barrier_cells.add(int(ci))
+                    barrier_cells.add(int(nei))
+                    a, b = (int(ci), int(nei)) if int(ci) < int(nei) else (int(nei), int(ci))
+                    blocked_edges.add((a, b))
+        if not barrier_cells:
+            raise RuntimeError("degenerate_barrier")
+
+        interface.local_partition_success = True
+        interface.local_partition_mode = "geodesic_surface_separation"
+        interface.local_patch_cell_ids = sorted(int(v) for v in patch_set)
+        interface.local_barrier_cell_ids = sorted(int(v) for v in barrier_cells)
+        interface.local_child_cell_ids = sorted(int(v) for v in child_cells)
+        interface.local_parent_cell_ids = sorted(int(v) for v in parent_cells)
+        interface.local_child_seed_cell_ids = sorted(int(v) for v in child_seeds)
+        interface.local_parent_seed_cell_ids = sorted(int(v) for v in parent_seeds)
+
+        if str(interface.method_tag) not in ("vmtk_bifurcation_section", "vmtk_bifurcation_profile"):
+            barrier_points = np.asarray([centers[int(ci)] for ci in sorted(barrier_cells)], dtype=float)
+            if barrier_points.shape[0] >= 3:
+                ordered_points = ordered_points_for_debug_line(barrier_points, interface.contour_normal)
+                interface.contour_points = np.asarray(ordered_points, dtype=float)
+                interface.contour_centroid = np.mean(np.asarray(ordered_points, dtype=float), axis=0)
+                if np.linalg.norm(np.asarray(interface.contour_normal, dtype=float)) < EPS:
+                    _, normal_vec, _ = planar_polygon_area_and_normal(np.asarray(ordered_points, dtype=float))
+                    interface.contour_normal = unit(normal_vec)
+            interface.method_tag = "geodesic_refined"
+
+        return {
+            "success": True,
+            "local_labels": local_labels,
+            "blocked_edges": blocked_edges,
+            "patch_cells": sorted(int(v) for v in patch_set),
+            "barrier_cells": sorted(int(v) for v in barrier_cells),
+        }
+    except Exception as exc:
+        warning = f"W_GEODESIC_PARTITION_FAILED_PLANE_FALLBACK: interface {int(interface.interface_id)} child {int(interface.child_segment_id)} parent {int(interface.parent_segment_id)}: {exc}"
+        if warning not in interface.warnings:
+            interface.warnings.append(warning)
+        fallback = _partition_transition_interface_plane_fallback(centers, adjacency, interface, segment_lookup)
+        if str(interface.method_tag) not in ("vmtk_bifurcation_section", "vmtk_bifurcation_profile"):
+            interface.method_tag = "heuristic_fallback"
+        return fallback
 
 
 def seed_segment_core_cells(
@@ -4019,7 +5542,10 @@ def assign_surface_cells_to_segments(
         start=1,
     ):
         interface.interface_id = int(order)
-        result = partition_transition_interface_on_surface(centers, adjacency, interface, segment_lookup)
+        result = partition_transition_interface_on_surface(centers, adjacency, interface, segment_lookup, surface=surface)
+        for warning in interface.warnings:
+            if warning not in warnings:
+                warnings.append(str(warning))
         for ci in result.get("patch_cells", []):
             interface_patch_mask[int(ci)] = 1
         for ci in result.get("barrier_cells", []):
@@ -4027,7 +5553,6 @@ def assign_surface_cells_to_segments(
             if interface_ids[int(ci)] < 0:
                 interface_ids[int(ci)] = int(interface.interface_id)
         if not bool(result.get("success", False)):
-            warnings.extend([w for w in interface.warnings if w not in warnings])
             continue
         local_interfaces_used += 1
         for edge in result.get("blocked_edges", set()):
@@ -4065,32 +5590,37 @@ def assign_surface_cells_to_segments(
         segment_lookup=segment_lookup,
     )
 
-    sample_step = max(0.60 * float(resampling_step), 0.35)
-    locator, sample_segment_map = build_segment_sample_locator(segments, sample_step=sample_step)
-    id_list = vtk.vtkIdList()
-    n_samples = max(8, min(32, len(sample_segment_map)))
-    for ci, center in enumerate(centers):
-        if labels[int(ci)] >= 0:
-            continue
-        id_list.Reset()
-        locator.FindClosestNPoints(int(n_samples), float(center[0]), float(center[1]), float(center[2]), id_list)
-        candidate_segment_ids: List[int] = []
-        seen_ids = set()
-        for k in range(id_list.GetNumberOfIds()):
-            sample_pid = int(id_list.GetId(k))
-            seg_id = int(sample_segment_map.get(sample_pid, -1))
-            if seg_id < 0 or seg_id in seen_ids:
-                continue
-            seen_ids.add(seg_id)
-            candidate_segment_ids.append(seg_id)
-        if not candidate_segment_ids:
-            candidate_segment_ids = [int(seg["segment_id"]) for seg in segments]
-        chosen_seg, used_fallback = choose_segment_for_point(center, candidate_segment_ids, segment_lookup)
-        labels[int(ci)] = int(chosen_seg)
-        assignment_modes[int(ci)] = 4
-        if used_fallback:
+    unassigned_before_global = np.flatnonzero(labels < 0).tolist()
+    if unassigned_before_global:
+        sample_step = max(0.60 * float(resampling_step), 0.35)
+        locator, sample_segment_map = build_segment_sample_locator(segments, sample_step=sample_step)
+        id_list = vtk.vtkIdList()
+        n_samples = max(8, min(32, len(sample_segment_map)))
+        for ci in [int(v) for v in unassigned_before_global]:
+            center = np.asarray(centers[int(ci)], dtype=float)
+            id_list.Reset()
+            locator.FindClosestNPoints(int(n_samples), float(center[0]), float(center[1]), float(center[2]), id_list)
+            candidate_segment_ids: List[int] = []
+            seen_ids = set()
+            for k in range(id_list.GetNumberOfIds()):
+                sample_pid = int(id_list.GetId(k))
+                seg_id = int(sample_segment_map.get(sample_pid, -1))
+                if seg_id < 0 or seg_id in seen_ids:
+                    continue
+                seen_ids.add(seg_id)
+                candidate_segment_ids.append(seg_id)
+            if not candidate_segment_ids:
+                candidate_segment_ids = [int(seg["segment_id"]) for seg in segments]
+            chosen_seg, _ = choose_segment_for_point(center, candidate_segment_ids, segment_lookup)
+            labels[int(ci)] = int(chosen_seg)
+            assignment_modes[int(ci)] = 4
             total_fallback += 1
             fallback_counts[int(chosen_seg)] = fallback_counts.get(int(chosen_seg), 0) + 1
+        warnings.append(f"W_FALLBACK_GLOBAL_RECOVERY_TRIGGERED: {len(unassigned_before_global)} cells required global fallback recovery.")
+        if len(unassigned_before_global) / max(int(surface.GetNumberOfCells()), 1) > 0.05:
+            warnings.append(
+                f"W_FALLBACK_GLOBAL_RECOVERY_HIGH: fallback assigned {len(unassigned_before_global) / max(int(surface.GetNumberOfCells()), 1):.1%} of surface cells. Inspect boundaries and junction geometry."
+            )
 
     unassigned = int(np.count_nonzero(labels < 0))
     if unassigned > 0:
@@ -4101,10 +5631,6 @@ def assign_surface_cells_to_segments(
             total_fallback += 1
             fallback_counts[int(segments[0]["segment_id"])] = fallback_counts.get(int(segments[0]["segment_id"]), 0) + 1
 
-    if total_fallback > 0:
-        warnings.append(
-            f"W_CELL_ASSIGNMENT_FALLBACK: {total_fallback} / {surface.GetNumberOfCells()} cells required low-confidence global recovery after local interface partitioning and propagation."
-        )
     debug_arrays = {
         "AssignmentMode": assignment_modes.astype(np.int32),
         "TransitionInterfaceId": interface_ids.astype(np.int32),
@@ -4244,6 +5770,7 @@ def transition_interface_to_json(interface: TransitionInterface) -> Dict[str, An
         "confidence": float(interface.confidence),
         "connection_zone_score": float(interface.connection_zone_score),
         "method_tag": str(interface.method_tag),
+        "junction_type": str(interface.junction_type),
         "representative_child_abscissa": (None if interface.representative_child_abscissa is None else float(interface.representative_child_abscissa)),
         "stable_zone_start_abscissa": (None if interface.stable_zone_start_abscissa is None else float(interface.stable_zone_start_abscissa)),
         "stable_zone_end_abscissa": (None if interface.stable_zone_end_abscissa is None else float(interface.stable_zone_end_abscissa)),
@@ -4288,6 +5815,48 @@ def segment_confidence(segment: Dict[str, Any], total_cells: int) -> float:
     return float(clamp(score, 0.0, 1.0))
 
 
+def run_post_assignment_qa(
+    surface: "vtkPolyData",
+    labels: np.ndarray,
+    segments: List[Dict[str, Any]],
+    transition_interfaces: List[TransitionInterface],
+    resampling_step: float,
+    warnings: List[str],
+) -> Dict[str, Any]:
+    qa_report: Dict[str, Any] = {
+        "fragmented_segments": [],
+        "high_fallback_segments": [],
+        "degenerate_barriers": [],
+        "unassigned_cell_count": int(np.count_nonzero(np.asarray(labels, dtype=int) < 0)),
+    }
+    labels_np = np.asarray(labels, dtype=int)
+    for seg in sorted(segments, key=lambda item: int(item["segment_id"])):
+        seg_id = int(seg["segment_id"])
+        seg_cell_ids = np.flatnonzero(labels_np == int(seg_id)).tolist()
+        if seg_cell_ids:
+            seg_pd = polydata_from_cell_ids(surface, [int(v) for v in seg_cell_ids])
+            conn = vtk.vtkPolyDataConnectivityFilter()
+            conn.SetInputData(seg_pd)
+            conn.SetExtractionModeToAllRegions()
+            conn.Update()
+            region_count = int(conn.GetNumberOfExtractedRegions())
+            if region_count > 1:
+                warnings.append(f"W_QA_SEGMENT_FRAGMENTED: segment {seg_id} has {region_count} disconnected regions")
+                qa_report["fragmented_segments"].append({"segment_id": int(seg_id), "region_count": int(region_count)})
+            fallback_fraction = float(seg.get("fallback_cell_count", 0)) / max(len(seg_cell_ids), 1)
+            if fallback_fraction > 0.25:
+                warnings.append(f"W_QA_HIGH_FALLBACK: segment {seg_id} fallback fraction {fallback_fraction:.2f}")
+                qa_report["high_fallback_segments"].append({"segment_id": int(seg_id), "fallback_fraction": float(fallback_fraction)})
+    for iface in sorted(transition_interfaces, key=lambda item: int(item.interface_id)):
+        barrier_count = int(len(iface.local_barrier_cell_ids))
+        if barrier_count < 3:
+            warnings.append(f"W_QA_BARRIER_DEGENERATE: interface {int(iface.interface_id)} has degenerate barrier ({barrier_count} cells)")
+            qa_report["degenerate_barriers"].append({"interface_id": int(iface.interface_id), "barrier_cell_count": int(barrier_count)})
+    if int(qa_report["unassigned_cell_count"]) > 0:
+        warnings.append(f"W_QA_UNASSIGNED_CELLS: {int(qa_report['unassigned_cell_count'])} cells unassigned after all passes.")
+    return qa_report
+
+
 def build_metadata(
     input_path: str,
     output_surface_path: str,
@@ -4299,6 +5868,11 @@ def build_metadata(
     centerline_info: Dict[str, Any],
     total_cells: int,
     assignment_mode_counts: Optional[Dict[str, int]] = None,
+    mesh_preflight: Optional[Dict[str, Any]] = None,
+    branch_extraction: Optional[Dict[str, Any]] = None,
+    bifurcation_sections_available: bool = False,
+    bifurcation_profiles_available: bool = False,
+    post_assignment_qa: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     interface_lookup = {int(iface.interface_id): iface for iface in transition_interfaces}
     segments_json: List[Dict[str, Any]] = []
@@ -4371,6 +5945,11 @@ def build_metadata(
         "output_metadata_json_path": os.path.abspath(output_metadata_path),
         "termination_detection_mode": str(termination_mode),
         "centerline_info": centerline_info,
+        "mesh_preflight": dict(mesh_preflight or {}),
+        "branch_extraction": dict(branch_extraction or {}),
+        "bifurcation_sections_available": bool(bifurcation_sections_available),
+        "bifurcation_profiles_available": bool(bifurcation_profiles_available),
+        "post_assignment_qa": dict(post_assignment_qa or {}),
         "segment_count": int(len(segments)),
         "segments": segments_json,
         "transition_interfaces": [transition_interface_to_json(iface) for iface in sorted(transition_interfaces, key=lambda item: int(item.interface_id))],
@@ -4389,7 +5968,7 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
         raise RuntimeError(f"Input VTP not found: {input_path}")
 
     surface_in = read_vtp(input_path)
-    surface_clean = sanitize_surface_for_segmentation(surface_in, warnings)
+    surface_clean, mesh_preflight = sanitize_surface_for_segmentation(surface_in, warnings)
     if args.debug:
         write_vtp(surface_clean, args.surface_cleaned)
 
@@ -4409,101 +5988,125 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
     centerline_info["root_confidence"] = float(root_conf)
     centerline_info["root_axis"] = np3_to_list(root_axis)
     centerline_info["root_source"] = str(root_term.source)
+    vtkvmtk_mod, err = try_import_vmtk()
+    if vtkvmtk_mod is None:
+        raise RuntimeError(f"VMTK vtkvmtk not available after centerline extraction: {err or _VTK_IMPORT_ERROR}")
+    grouped_centerlines, branch_extraction_succeeded, branch_extraction_info = extract_branch_topology(centerlines, vtkvmtk_mod, warnings)
+    centerline_info["branch_extraction"] = dict(branch_extraction_info)
+    bifurcation_reference_points = compute_bifurcation_reference_points(grouped_centerlines, vtkvmtk_mod, warnings)
+    bifurcation_sections = extract_bifurcation_sections(surface_clean, grouped_centerlines, vtkvmtk_mod, warnings)
+    bifurcation_profiles = extract_bifurcation_profiles(surface_clean, grouped_centerlines, vtkvmtk_mod, warnings)
 
-    adjacency, cl_pts, _ = build_graph_from_polyline_centerlines(centerlines)
-    if not adjacency:
-        raise RuntimeError("Centerline graph is empty after VMTK extraction.")
+    if branch_extraction_succeeded:
+        ordered_segments, branch_topology_info = build_segments_from_branch_groups(grouped_centerlines, terms, root_term, warnings)
+        centerline_info["endpoint_count"] = int(sum(1 for seg in ordered_segments if seg.get("distal_terminal_term") is not None) + 1)
+        centerline_info["junction_keynode_count"] = int(branch_topology_info.get("bifurcation_group_count", 0))
+        centerline_info["reduced_supernode_count"] = int(len(ordered_segments))
+        centerline_info["segment_record_count"] = int(len(ordered_segments))
+        centerline_info.update(branch_topology_info)
+    else:
+        adjacency, cl_pts, _ = build_graph_from_polyline_centerlines(centerlines)
+        if not adjacency:
+            raise RuntimeError("Centerline graph is empty after VMTK extraction.")
 
-    radii_raw = get_point_array_numpy(centerlines, "MaximumInscribedSphereRadius")
-    radii = np.asarray(radii_raw, dtype=float).reshape(-1) if radii_raw is not None else None
+        radii_raw = get_point_array_numpy(centerlines, "MaximumInscribedSphereRadius")
+        radii = np.asarray(radii_raw, dtype=float).reshape(-1) if radii_raw is not None else None
 
-    deg = node_degrees(adjacency)
-    endpoints = [int(n) for n, d in sorted(deg.items()) if int(d) == 1]
-    if len(endpoints) < 2:
-        raise RuntimeError("Centerline graph does not contain enough endpoints.")
-    centerline_info["endpoint_count"] = int(len(endpoints))
-    centerline_info["junction_keynode_count"] = int(sum(1 for _, d in deg.items() if int(d) >= 3))
+        deg = node_degrees(adjacency)
+        endpoints = [int(n) for n, d in sorted(deg.items()) if int(d) == 1]
+        if len(endpoints) < 2:
+            raise RuntimeError("Centerline graph does not contain enough endpoints.")
+        centerline_info["endpoint_count"] = int(len(endpoints))
+        centerline_info["junction_keynode_count"] = int(sum(1 for _, d in deg.items() if int(d) >= 3))
 
-    term_to_endpoint = map_terminations_to_centerline_endpoints(endpoints, cl_pts, terms, root_term, warnings)
-    root_term_idx = int(terms.index(root_term))
-    root_endpoint = int(term_to_endpoint[root_term_idx]["endpoint_node"]) if root_term_idx in term_to_endpoint else int(endpoints[0])
+        term_to_endpoint = map_terminations_to_centerline_endpoints(endpoints, cl_pts, terms, root_term, warnings)
+        root_term_idx = int(terms.index(root_term))
+        root_endpoint = int(term_to_endpoint[root_term_idx]["endpoint_node"]) if root_term_idx in term_to_endpoint else int(endpoints[0])
 
-    supernode_for_keynode, chains, _, _ = collapse_junction_clusters(adjacency, cl_pts, float(centerline_info["resampling_step"]))
-    super_adj, segment_records = build_supernode_graph_and_segments(chains, supernode_for_keynode, cl_pts, radii)
-    if not segment_records:
-        raise RuntimeError("Failed to derive any centerline segments from the centerline graph.")
-    centerline_info["reduced_supernode_count"] = int(len(super_adj))
-    centerline_info["segment_record_count"] = int(len(segment_records))
+        supernode_for_keynode, chains, _, _ = collapse_junction_clusters(adjacency, cl_pts, float(centerline_info["resampling_step"]))
+        super_adj, segment_records = build_supernode_graph_and_segments(chains, supernode_for_keynode, cl_pts, radii)
+        if not segment_records:
+            raise RuntimeError("Failed to derive any centerline segments from the centerline graph.")
+        centerline_info["reduced_supernode_count"] = int(len(super_adj))
+        centerline_info["segment_record_count"] = int(len(segment_records))
 
-    endpoint_to_supernode = {int(node): int(supernode_for_keynode[int(node)]) for node in endpoints if int(node) in supernode_for_keynode}
-    term_supernode_map: Dict[int, int] = {}
-    for term_idx, mapping in term_to_endpoint.items():
-        ep = int(mapping["endpoint_node"])
-        if ep in endpoint_to_supernode:
-            term_supernode_map[int(term_idx)] = int(endpoint_to_supernode[ep])
+        endpoint_to_supernode = {int(node): int(supernode_for_keynode[int(node)]) for node in endpoints if int(node) in supernode_for_keynode}
+        term_supernode_map: Dict[int, int] = {}
+        for term_idx, mapping in term_to_endpoint.items():
+            ep = int(mapping["endpoint_node"])
+            if ep in endpoint_to_supernode:
+                term_supernode_map[int(term_idx)] = int(endpoint_to_supernode[ep])
 
-    root_supernode = int(term_supernode_map.get(root_term_idx, endpoint_to_supernode.get(root_endpoint, -1)))
-    if root_supernode < 0:
-        raise RuntimeError("Failed to map the chosen root termination to the reduced segment graph.")
+        root_supernode = int(term_supernode_map.get(root_term_idx, endpoint_to_supernode.get(root_endpoint, -1)))
+        if root_supernode < 0:
+            raise RuntimeError("Failed to map the chosen root termination to the reduced segment graph.")
 
-    dist_super, _ = dijkstra_shortest_paths(super_adj, root_supernode)
-    ordered_segments: List[Dict[str, Any]] = []
-    for seg_id, seg in enumerate(
-        sorted(
-            segment_records,
-            key=lambda item: (min(int(item["supernode_a"]), int(item["supernode_b"])), max(int(item["supernode_a"]), int(item["supernode_b"]))),
-        ),
-        start=1,
-    ):
-        sa = int(seg["supernode_a"])
-        sb = int(seg["supernode_b"])
-        da = float(dist_super.get(sa, float("inf")))
-        db = float(dist_super.get(sb, float("inf")))
-        if da <= db:
-            proximal_supernode = sa
-            distal_supernode = sb
-            node_path_oriented = list(seg["node_path"])
-            path_points_oriented = np.asarray(seg["path_points"], dtype=float)
-            path_radii_oriented = None if seg["path_radii"] is None else np.asarray(seg["path_radii"], dtype=float)
-        else:
-            proximal_supernode = sb
-            distal_supernode = sa
-            node_path_oriented = list(reversed(seg["node_path"]))
-            path_points_oriented = np.asarray(seg["path_points"], dtype=float)[::-1]
-            path_radii_oriented = None if seg["path_radii"] is None else np.asarray(seg["path_radii"], dtype=float)[::-1]
+        dist_super, _ = dijkstra_shortest_paths(super_adj, root_supernode)
+        ordered_segments = []
+        for seg_id, seg in enumerate(
+            sorted(
+                segment_records,
+                key=lambda item: (min(int(item["supernode_a"]), int(item["supernode_b"])), max(int(item["supernode_a"]), int(item["supernode_b"]))),
+            ),
+            start=1,
+        ):
+            sa = int(seg["supernode_a"])
+            sb = int(seg["supernode_b"])
+            da = float(dist_super.get(sa, float("inf")))
+            db = float(dist_super.get(sb, float("inf")))
+            if da <= db:
+                proximal_supernode = sa
+                distal_supernode = sb
+                node_path_oriented = list(seg["node_path"])
+                path_points_oriented = np.asarray(seg["path_points"], dtype=float)
+                path_radii_oriented = None if seg["path_radii"] is None else np.asarray(seg["path_radii"], dtype=float)
+            else:
+                proximal_supernode = sb
+                distal_supernode = sa
+                node_path_oriented = list(reversed(seg["node_path"]))
+                path_points_oriented = np.asarray(seg["path_points"], dtype=float)[::-1]
+                path_radii_oriented = None if seg["path_radii"] is None else np.asarray(seg["path_radii"], dtype=float)[::-1]
 
-        ordered_segments.append(
-            {
-                "segment_id": int(seg_id),
-                "supernode_proximal": int(proximal_supernode),
-                "supernode_distal": int(distal_supernode),
-                "node_path_oriented": [int(v) for v in node_path_oriented],
-                "path_points_oriented": np.asarray(path_points_oriented, dtype=float),
-                "path_radii_oriented": (None if path_radii_oriented is None else np.asarray(path_radii_oriented, dtype=float)),
-                "length": float(seg["length"]),
-                "warnings": [],
-            }
-        )
+            ordered_segments.append(
+                {
+                    "segment_id": int(seg_id),
+                    "group_id": int(seg_id),
+                    "centerline_group_id": int(seg_id),
+                    "parent_group_id": None,
+                    "proximal_bifurcation_group_id": None,
+                    "distal_bifurcation_group_id": None,
+                    "supernode_proximal": int(proximal_supernode),
+                    "supernode_distal": int(distal_supernode),
+                    "node_path_oriented": [int(v) for v in node_path_oriented],
+                    "path_points_oriented": np.asarray(path_points_oriented, dtype=float),
+                    "path_radii_oriented": (None if path_radii_oriented is None else np.asarray(path_radii_oriented, dtype=float)),
+                    "length": float(seg["length"]),
+                    "warnings": [],
+                }
+            )
 
-    segments_by_proximal_supernode: Dict[int, List[int]] = {}
-    for seg in ordered_segments:
-        segments_by_proximal_supernode.setdefault(int(seg["supernode_proximal"]), []).append(int(seg["segment_id"]))
+        segments_by_proximal_supernode: Dict[int, List[int]] = {}
+        for seg in ordered_segments:
+            segments_by_proximal_supernode.setdefault(int(seg["supernode_proximal"]), []).append(int(seg["segment_id"]))
 
-    parent_segment_for_supernode: Dict[int, Optional[int]] = {int(root_supernode): None}
-    for seg in sorted(ordered_segments, key=lambda item: float(dist_super.get(int(item["supernode_proximal"]), float("inf")))):
-        prox_super = int(seg["supernode_proximal"])
-        dist_supernode = int(seg["supernode_distal"])
-        seg["parent_segment_id"] = parent_segment_for_supernode.get(prox_super)
-        parent_segment_for_supernode[dist_supernode] = int(seg["segment_id"])
+        parent_segment_for_supernode: Dict[int, Optional[int]] = {int(root_supernode): None}
+        for seg in sorted(ordered_segments, key=lambda item: float(dist_super.get(int(item["supernode_proximal"]), float("inf")))):
+            prox_super = int(seg["supernode_proximal"])
+            dist_supernode = int(seg["supernode_distal"])
+            seg["parent_segment_id"] = parent_segment_for_supernode.get(prox_super)
+            parent_segment_for_supernode[dist_supernode] = int(seg["segment_id"])
 
-    for seg in ordered_segments:
-        child_ids = segments_by_proximal_supernode.get(int(seg["supernode_distal"]), [])
-        seg["child_segment_ids"] = sorted(int(v) for v in child_ids if int(v) != int(seg["segment_id"]))
+        for seg in ordered_segments:
+            child_ids = segments_by_proximal_supernode.get(int(seg["supernode_distal"]), [])
+            seg["child_segment_ids"] = sorted(int(v) for v in child_ids if int(v) != int(seg["segment_id"]))
 
-    segment_lookup: Dict[int, Dict[str, Any]] = {int(seg["segment_id"]): seg for seg in ordered_segments}
-    supernode_to_term: Dict[int, BoundaryProfile] = {}
-    for term_idx, supernode_id in term_supernode_map.items():
-        supernode_to_term[int(supernode_id)] = terms[int(term_idx)]
+        segment_lookup = {int(seg["segment_id"]): seg for seg in ordered_segments}
+        supernode_to_term: Dict[int, BoundaryProfile] = {}
+        for term_idx, supernode_id in term_supernode_map.items():
+            supernode_to_term[int(supernode_id)] = terms[int(term_idx)]
+        for seg in ordered_segments:
+            seg["proximal_terminal_term"] = supernode_to_term.get(int(seg["supernode_proximal"]))
+            seg["distal_terminal_term"] = supernode_to_term.get(int(seg["supernode_distal"]))
 
     section_debug_records: List[Dict[str, Any]] = []
     transition_interfaces: List[TransitionInterface] = []
@@ -4523,10 +6126,7 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
         start_inward = unit(path_points[1] - path_points[0]) if path_points.shape[0] >= 2 else np.array([0.0, 0.0, 1.0], dtype=float)
         end_inward = unit(path_points[-2] - path_points[-1]) if path_points.shape[0] >= 2 else -start_inward
 
-        prox_super = int(seg["supernode_proximal"])
-        dist_supernode = int(seg["supernode_distal"])
-
-        prox_term = supernode_to_term.get(prox_super)
+        prox_term = seg.get("proximal_terminal_term")
         if prox_term is not None or seg["parent_segment_id"] is None:
             proximal_boundary = build_terminal_boundary_profile(
                 prox_term,
@@ -4537,12 +6137,17 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
             )
         else:
             parent_seg = segment_lookup[int(seg["parent_segment_id"])]
+            junction_type = classify_junction_type(parent_seg, seg, ordered_segments, grouped_centerlines, warnings)
             proximal_boundary, parent_info, child_debug, transition_interface = refine_child_proximal_boundary(
                 surface=surface_clean,
                 parent_seg=parent_seg,
                 child_seg=seg,
                 resampling_step=float(centerline_info["resampling_step"]),
                 warnings=warnings,
+                junction_type=junction_type,
+                bifurcation_reference_points=bifurcation_reference_points,
+                bifurcation_sections=bifurcation_sections,
+                bifurcation_profiles=bifurcation_profiles,
             )
             if transition_interface is not None:
                 transition_interfaces.append(transition_interface)
@@ -4553,9 +6158,9 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
         seg["warnings"].extend(list(proximal_boundary.warnings))
         seg["proximal_plane_tolerance"] = float(max(float(seg["mean_radius"]) * 0.40, 0.45 * float(centerline_info["resampling_step"]), 0.35))
 
-        if dist_supernode in supernode_to_term:
+        if seg.get("distal_terminal_term") is not None:
             distal_boundary = build_terminal_boundary_profile(
-                supernode_to_term.get(dist_supernode),
+                seg.get("distal_terminal_term"),
                 fallback_center=path_points[-1],
                 inward_direction=end_inward,
                 fallback_radius=float(seg["mean_radius"]),
@@ -4643,6 +6248,14 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
     for seg in ordered_segments:
         seg["fallback_cell_count"] = int(fallback_counts.get(int(seg["segment_id"]), 0))
         seg["segment_confidence_cached"] = float(segment_confidence(seg, int(surface_clean.GetNumberOfCells())))
+    qa_report = run_post_assignment_qa(
+        surface=surface_clean,
+        labels=labels,
+        segments=ordered_segments,
+        transition_interfaces=transition_interfaces,
+        resampling_step=float(centerline_info["resampling_step"]),
+        warnings=warnings,
+    )
 
     boundary_debug_records: List[Dict[str, Any]] = []
     for seg in ordered_segments:
@@ -4709,6 +6322,11 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
         centerline_info=centerline_info,
         total_cells=int(surface_clean.GetNumberOfCells()),
         assignment_mode_counts=assignment_mode_counts,
+        mesh_preflight=mesh_preflight,
+        branch_extraction=branch_extraction_info,
+        bifurcation_sections_available=bool(bifurcation_sections),
+        bifurcation_profiles_available=bool(bifurcation_profiles),
+        post_assignment_qa=qa_report,
     )
     metadata["face_partition_region_count"] = int(len(face_regions))
     metadata["cell_assignment_total_fallback"] = int(total_fallback)
