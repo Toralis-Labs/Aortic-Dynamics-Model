@@ -1,0 +1,3 @@
+status=failed
+error=RuntimeError: Unable to normalize trunk direction for infrarenal analysis. Current order failed: s_right_renal=3.198769 must be < s_bif=3.198769. s_left_renal=3.198769 must be < s_bif=3.198769. s_lowest_renal=3.198769 must be < s_bif=3.198769. Reversed order failed: s_inlet=3.198769 must be < s_bif=0.000000. s_inlet=3.198769 must be < s_right_renal=0.000000. s_right_renal=0.000000 must be < s_bif=0.000000. s_inlet=3.198769 must be < s_left_renal=0.000000. s_left_renal=0.000000 must be < s_bif=0.000000. s_lowest_renal=0.000000 must be < s_bif=0.000000.
+warnings=W_TRUNK_OVERLAP_PRUNED: overlapping trunk scaffold intervals were reduced to the inlet-to-bifurcation path for downstream measurement.

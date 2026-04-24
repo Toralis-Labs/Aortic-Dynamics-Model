@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<format version="1.0" />
+<model type="PolyData">
+    <timestep id="0">
+        <model_element type="PolyData" num_sampling="0">
+            <faces>
+                <face id="1" name="wall" type="wall" color1="0.0" color2="0.0" color3="0.5" visible="true" opacity="1" />
+                <face id="10" name="renal_left" type="cap" color1="0.0" color2="0.0" color3="0.909982174688057" visible="true" opacity="1" />
+                <face id="11" name="renal_right" type="cap" color1="0.0" color2="0.22156862745098038" color3="1.0" visible="true" opacity="1" />
+                <face id="12" name="SMA" type="cap" color1="0.0" color2="0.5823529411764706" color3="1.0" visible="true" opacity="1" />
+                <face id="2" name="inflow" type="cap" color1="0.04743833017077798" color2="0.9588235294117647" color3="0.920303605313093" visible="true" opacity="1" />
+                <face id="3" name="celiac_hepatic" type="cap" color1="0.3383934218848829" color2="1.0" color3="0.629348513598988" visible="true" opacity="1" />
+                <face id="4" name="celiac_splenic" type="cap" color1="0.6293485135989879" color2="1.0" color3="0.338393421884883" visible="true" opacity="1" />
+                <face id="5" name="ext_iliac_left" type="cap" color1="0.9203036053130929" color2="1.0" color3="0.04743833017077803" visible="true" opacity="1" />
+                <face id="6" name="ext_iliac_right" type="cap" color1="1.0" color2="0.6688453159041396" color3="0.0" visible="true" opacity="1" />
+                <face id="7" name="IMA" type="cap" color1="1.0" color2="0.33478576615831535" color3="0.0" visible="true" opacity="1" />
+                <face id="8" name="int_iliac_left" type="cap" color1="0.9099821746880573" color2="0.0007262164124910431" color3="0.0" visible="true" opacity="1" />
+                <face id="9" name="int_iliac_right" type="cap" color1="0.5" color2="0.0" color3="0.0" visible="true" opacity="1" />
+            </faces>
+            <blend_radii />
+            <blend_param blend_iters="2" sub_blend_iters="3" cstr_smooth_iters="2" lap_smooth_iters="50" subdivision_iters="1" decimation="0.01" />
+        </model_element>
+    </timestep>
+</model>

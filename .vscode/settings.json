@@ -1,0 +1,17 @@
+{
+  "python-envs.defaultEnvManager": "ms-python.python:system",
+  "python-envs.defaultPackageManager": "ms-python.python:pip",
+  "python.defaultInterpreterPath": "C:\\Users\\ibrah\\miniconda3\\envs\\vmtk_env\\python.exe",
+  "python.terminal.activateEnvironment": true,
+  "terminal.integrated.profiles.windows": {
+    "Miniconda Prompt": {
+      "path": "C:\\Windows\\System32\\cmd.exe",
+      "args": [
+        "/K",
+        "C:\\Users\\ibrah\\miniconda3\\Scripts\\activate.bat",
+        "C:\\Users\\ibrah\\miniconda3"
+      ]
+    }
+  },
+  "terminal.integrated.defaultProfile.windows": "Miniconda Prompt"
+}

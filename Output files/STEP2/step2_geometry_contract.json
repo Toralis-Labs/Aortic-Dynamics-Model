@@ -1,0 +1,975 @@
+{
+  "schema_name": "step2_geometry_contract",
+  "schema_version": 1,
+  "status": "success",
+  "inputs": {
+    "source_lumen_surface": "C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\0044_H_ABAO_AAA\\0156_0001.vtp",
+    "face_id_to_name": "C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\0044_H_ABAO_AAA\\face_id_to_name.json"
+  },
+  "upstream_step1_references": {
+    "surface_cleaned": "C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\Output files\\STEP1\\surface_cleaned.vtp",
+    "centerline_network": "C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\Output files\\STEP1\\centerline_network.vtp",
+    "centerline_network_metadata": "C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\Output files\\STEP1\\centerline_network_metadata.json"
+  },
+  "coordinate_system": {
+    "name": "source_model_coordinates",
+    "units": "mm"
+  },
+  "aorta_start": {
+    "source_type": "face_map_model_face",
+    "face_id": 2,
+    "centroid": [
+      -1.4198260467905244,
+      13.00392460465364,
+      87.3409955234283
+    ],
+    "normal": [
+      0.30927342443780625,
+      0.264926216978239,
+      -0.9133258172712033
+    ],
+    "area": 4.610100374094678,
+    "equivalent_diameter": 2.422759191809147,
+    "major_diameter": 2.458891730061375,
+    "minor_diameter": 2.4535076316639093,
+    "cell_count": 990,
+    "confidence": 0.95,
+    "source": "face_partition:ModelFaceID:2"
+  },
+  "aorta_end": {
+    "centerline_landmark": {
+      "name": "aorta_end_pre_bifurcation",
+      "node_id": 4,
+      "point": [
+        -1.0228465795516968,
+        17.346933364868164,
+        65.88009643554688
+      ],
+      "source_type": "step1_centerline_topology",
+      "confidence": 0.9,
+      "resolution_detail": {
+        "method": "deepest_common_node_across_mapped_iliac_routes",
+        "used_iliac_faces": [
+          {
+            "face_id": 5,
+            "face_name": "left_external_iliac",
+            "terminal_node_id": 6
+          },
+          {
+            "face_id": 8,
+            "face_name": "left_internal_iliac",
+            "terminal_node_id": 13
+          },
+          {
+            "face_id": 6,
+            "face_name": "right_external_iliac",
+            "terminal_node_id": 8
+          },
+          {
+            "face_id": 9,
+            "face_name": "right_internal_iliac",
+            "terminal_node_id": 9
+          }
+        ],
+        "missing_iliac_names": [],
+        "path_count": 4
+      }
+    },
+    "bifurcation_point": [
+      -1.0228465795516968,
+      17.346933364868164,
+      65.88009643554688
+    ],
+    "boundary_centroid": [
+      -1.3184803071267464,
+      17.217301689276173,
+      66.40982683967141
+    ],
+    "boundary_normal": [
+      0.3938315949782886,
+      -0.0030903425317977966,
+      -0.9191774173574401
+    ],
+    "area": 6.0681877203602195,
+    "equivalent_diameter": 2.7796144643527367,
+    "major_diameter": 2.8330358775386575,
+    "minor_diameter": 2.8176317965808177,
+    "surface_boundary_profile": {
+      "surface_derived": true,
+      "extraction_method": "surface_plane_cut_pre_bifurcation",
+      "section_offset_from_bifurcation_mm": 0.6056897979522867,
+      "section_arclength": 22.923038028653995,
+      "boundary_centroid": [
+        -1.3184803071267464,
+        17.217301689276173,
+        66.40982683967141
+      ],
+      "boundary_normal": [
+        0.3938315949782886,
+        -0.0030903425317977966,
+        -0.9191774173574401
+      ],
+      "area": 6.0681877203602195,
+      "equivalent_diameter": 2.7796144643527367,
+      "major_diameter": 2.8330358775386575,
+      "minor_diameter": 2.8176317965808177,
+      "rms_planarity": 1.9306361053044925e-06,
+      "closed_gap": 0.0,
+      "point_count": 119,
+      "confidence": 0.9,
+      "attempts": [
+        {
+          "offset_from_bifurcation_mm": 0.6056897979522867,
+          "section_arclength": 22.923038028653995,
+          "candidate_count": 1
+        }
+      ]
+    },
+    "local_tangent": [
+      0.44844278445301294,
+      0.06409396213827732,
+      -0.8915105344803536
+    ],
+    "confidence": 0.9,
+    "extraction_method": "centerline_common_iliac_routes_plus_surface_plane_cut",
+    "surface_derived": true,
+    "centerline_derived": true,
+    "source_components": [
+      "centerline_landmark",
+      "surface_derived_boundary_profile"
+    ]
+  },
+  "aorta_trunk": {
+    "length": 23.528727826606282,
+    "node_path": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "centerline_vtp": "C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\Output files\\STEP2\\aorta_centerline.vtp"
+  },
+  "segments_vtp": "C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\Output files\\STEP2\\segmentscolored.vtp",
+  "segment_summary": [
+    {
+      "segment_id": 1,
+      "name_hint": "abdominal_aorta_trunk",
+      "segment_type": "aorta_trunk",
+      "parent_segment_id": null,
+      "child_segment_ids": [
+        2,
+        3,
+        4,
+        5,
+        8,
+        9,
+        10
+      ],
+      "proximal_node_id": 0,
+      "distal_node_id": 4,
+      "proximal_point": [
+        -1.4160959720611572,
+        13.016472816467285,
+        87.34590148925781
+      ],
+      "distal_point": [
+        -1.0228465795516968,
+        17.346933364868164,
+        65.88009643554688
+      ],
+      "edge_ids": [
+        0,
+        1,
+        3,
+        7
+      ],
+      "length": 23.528727826606282,
+      "terminal_face_id": null,
+      "terminal_face_name": null,
+      "descendant_terminal_names": [
+        "left_external_iliac",
+        "left_internal_iliac",
+        "right_external_iliac",
+        "right_internal_iliac"
+      ],
+      "cell_count": 19659,
+      "fallback_cell_count": 0
+    },
+    {
+      "segment_id": 2,
+      "name_hint": "celiac_proximal_candidate",
+      "segment_type": "topology_branch",
+      "parent_segment_id": 1,
+      "child_segment_ids": [
+        6,
+        7
+      ],
+      "proximal_node_id": 1,
+      "distal_node_id": 11,
+      "proximal_point": [
+        -1.9555439949035645,
+        14.788565635681152,
+        79.92728424072266
+      ],
+      "distal_point": [
+        -2.489469289779663,
+        17.568758010864258,
+        78.96595764160156
+      ],
+      "edge_ids": [
+        2
+      ],
+      "length": 3.180265671701226,
+      "terminal_face_id": null,
+      "terminal_face_name": null,
+      "descendant_terminal_names": [
+        "celiac_artery",
+        "celiac_branch"
+      ],
+      "cell_count": 13436,
+      "fallback_cell_count": 0
+    },
+    {
+      "segment_id": 3,
+      "name_hint": "superior_mesenteric_artery",
+      "segment_type": "terminal_branch",
+      "parent_segment_id": 1,
+      "child_segment_ids": [],
+      "proximal_node_id": 2,
+      "distal_node_id": 10,
+      "proximal_point": [
+        -2.160902738571167,
+        15.884684562683105,
+        77.21051025390625
+      ],
+      "distal_point": [
+        -2.325648069381714,
+        21.205533981323242,
+        74.10663604736328
+      ],
+      "edge_ids": [
+        4
+      ],
+      "length": 9.079185619542297,
+      "terminal_face_id": 12,
+      "terminal_face_name": "superior_mesenteric_artery",
+      "descendant_terminal_names": [
+        "superior_mesenteric_artery"
+      ],
+      "cell_count": 28310,
+      "fallback_cell_count": 0
+    },
+    {
+      "segment_id": 4,
+      "name_hint": "right_renal_artery",
+      "segment_type": "terminal_branch",
+      "parent_segment_id": 1,
+      "child_segment_ids": [],
+      "proximal_node_id": 2,
+      "distal_node_id": 15,
+      "proximal_point": [
+        -2.160902738571167,
+        15.884684562683105,
+        77.21051025390625
+      ],
+      "distal_point": [
+        3.993032455444336,
+        14.49458122253418,
+        77.561279296875
+      ],
+      "edge_ids": [
+        5
+      ],
+      "length": 7.6354674226710175,
+      "terminal_face_id": 11,
+      "terminal_face_name": "right_renal_artery",
+      "descendant_terminal_names": [
+        "right_renal_artery"
+      ],
+      "cell_count": 36391,
+      "fallback_cell_count": 0
+    },
+    {
+      "segment_id": 5,
+      "name_hint": "left_renal_artery",
+      "segment_type": "terminal_branch",
+      "parent_segment_id": 1,
+      "child_segment_ids": [],
+      "proximal_node_id": 2,
+      "distal_node_id": 16,
+      "proximal_point": [
+        -2.160902738571167,
+        15.884684562683105,
+        77.21051025390625
+      ],
+      "distal_point": [
+        -7.5351715087890625,
+        13.965652465820312,
+        76.38933563232422
+      ],
+      "edge_ids": [
+        6
+      ],
+      "length": 6.522722631570678,
+      "terminal_face_id": 10,
+      "terminal_face_name": "left_renal_artery",
+      "descendant_terminal_names": [
+        "left_renal_artery"
+      ],
+      "cell_count": 26430,
+      "fallback_cell_count": 0
+    },
+    {
+      "segment_id": 6,
+      "name_hint": "celiac_artery",
+      "segment_type": "terminal_branch",
+      "parent_segment_id": 2,
+      "child_segment_ids": [],
+      "proximal_node_id": 11,
+      "distal_node_id": 12,
+      "proximal_point": [
+        -2.489469289779663,
+        17.568758010864258,
+        78.96595764160156
+      ],
+      "distal_point": [
+        -2.327183961868286,
+        19.48626136779785,
+        81.69365692138672
+      ],
+      "edge_ids": [
+        15
+      ],
+      "length": 4.271696213547417,
+      "terminal_face_id": 4,
+      "terminal_face_name": "celiac_artery",
+      "descendant_terminal_names": [
+        "celiac_artery"
+      ],
+      "cell_count": 21470,
+      "fallback_cell_count": 0
+    },
+    {
+      "segment_id": 7,
+      "name_hint": "celiac_branch",
+      "segment_type": "terminal_branch",
+      "parent_segment_id": 2,
+      "child_segment_ids": [],
+      "proximal_node_id": 11,
+      "distal_node_id": 14,
+      "proximal_point": [
+        -2.489469289779663,
+        17.568758010864258,
+        78.96595764160156
+      ],
+      "distal_point": [
+        1.8066630363464355,
+        22.382625579833984,
+        79.32485961914062
+      ],
+      "edge_ids": [
+        16
+      ],
+      "length": 8.068437366241337,
+      "terminal_face_id": 3,
+      "terminal_face_name": "celiac_branch",
+      "descendant_terminal_names": [
+        "celiac_branch"
+      ],
+      "cell_count": 23827,
+      "fallback_cell_count": 0
+    },
+    {
+      "segment_id": 8,
+      "name_hint": "inferior_mesenteric_artery",
+      "segment_type": "terminal_branch",
+      "parent_segment_id": 1,
+      "child_segment_ids": [],
+      "proximal_node_id": 3,
+      "distal_node_id": 17,
+      "proximal_point": [
+        -1.2715588808059692,
+        18.53172492980957,
+        71.75062561035156
+      ],
+      "distal_point": [
+        -2.3282084465026855,
+        19.388967514038086,
+        67.04728698730469
+      ],
+      "edge_ids": [
+        8
+      ],
+      "length": 6.228862166778982,
+      "terminal_face_id": 7,
+      "terminal_face_name": "inferior_mesenteric_artery",
+      "descendant_terminal_names": [
+        "inferior_mesenteric_artery"
+      ],
+      "cell_count": 16802,
+      "fallback_cell_count": 0
+    },
+    {
+      "segment_id": 9,
+      "name_hint": "left_common_iliac_candidate",
+      "segment_type": "topology_branch",
+      "parent_segment_id": 1,
+      "child_segment_ids": [
+        11,
+        12
+      ],
+      "proximal_node_id": 4,
+      "distal_node_id": 5,
+      "proximal_point": [
+        -1.0228465795516968,
+        17.346933364868164,
+        65.88009643554688
+      ],
+      "distal_point": [
+        -2.3995490074157715,
+        14.630635261535645,
+        61.521705627441406
+      ],
+      "edge_ids": [
+        9
+      ],
+      "length": 5.788625818570685,
+      "terminal_face_id": null,
+      "terminal_face_name": null,
+      "descendant_terminal_names": [
+        "left_external_iliac",
+        "left_internal_iliac"
+      ],
+      "cell_count": 4130,
+      "fallback_cell_count": 0
+    },
+    {
+      "segment_id": 10,
+      "name_hint": "right_common_iliac_candidate",
+      "segment_type": "topology_branch",
+      "parent_segment_id": 1,
+      "child_segment_ids": [
+        13,
+        14
+      ],
+      "proximal_node_id": 4,
+      "distal_node_id": 7,
+      "proximal_point": [
+        -1.0228465795516968,
+        17.346933364868164,
+        65.88009643554688
+      ],
+      "distal_point": [
+        3.9931862354278564,
+        15.233983039855957,
+        61.79496383666992
+      ],
+      "edge_ids": [
+        10
+      ],
+      "length": 7.375631439824847,
+      "terminal_face_id": null,
+      "terminal_face_name": null,
+      "descendant_terminal_names": [
+        "right_external_iliac",
+        "right_internal_iliac"
+      ],
+      "cell_count": 5844,
+      "fallback_cell_count": 0
+    },
+    {
+      "segment_id": 11,
+      "name_hint": "left_external_iliac",
+      "segment_type": "terminal_branch",
+      "parent_segment_id": 9,
+      "child_segment_ids": [],
+      "proximal_node_id": 5,
+      "distal_node_id": 6,
+      "proximal_point": [
+        -2.3995490074157715,
+        14.630635261535645,
+        61.521705627441406
+      ],
+      "distal_point": [
+        -8.650901794433594,
+        18.370092391967773,
+        50.89533615112305
+      ],
+      "edge_ids": [
+        11
+      ],
+      "length": 19.15521267316589,
+      "terminal_face_id": 5,
+      "terminal_face_name": "left_external_iliac",
+      "descendant_terminal_names": [
+        "left_external_iliac"
+      ],
+      "cell_count": 12303,
+      "fallback_cell_count": 0
+    },
+    {
+      "segment_id": 12,
+      "name_hint": "left_internal_iliac",
+      "segment_type": "terminal_branch",
+      "parent_segment_id": 9,
+      "child_segment_ids": [],
+      "proximal_node_id": 5,
+      "distal_node_id": 13,
+      "proximal_point": [
+        -2.3995490074157715,
+        14.630635261535645,
+        61.521705627441406
+      ],
+      "distal_point": [
+        -3.322920322418213,
+        10.741942405700684,
+        58.81515121459961
+      ],
+      "edge_ids": [
+        12
+      ],
+      "length": 6.575937946416483,
+      "terminal_face_id": 8,
+      "terminal_face_name": "left_internal_iliac",
+      "descendant_terminal_names": [
+        "left_internal_iliac"
+      ],
+      "cell_count": 6301,
+      "fallback_cell_count": 0
+    },
+    {
+      "segment_id": 13,
+      "name_hint": "right_external_iliac",
+      "segment_type": "terminal_branch",
+      "parent_segment_id": 10,
+      "child_segment_ids": [],
+      "proximal_node_id": 7,
+      "distal_node_id": 8,
+      "proximal_point": [
+        3.9931862354278564,
+        15.233983039855957,
+        61.79496383666992
+      ],
+      "distal_point": [
+        7.8015971183776855,
+        19.729467391967773,
+        51.06022262573242
+      ],
+      "edge_ids": [
+        13
+      ],
+      "length": 17.729280793814144,
+      "terminal_face_id": 6,
+      "terminal_face_name": "right_external_iliac",
+      "descendant_terminal_names": [
+        "right_external_iliac"
+      ],
+      "cell_count": 13100,
+      "fallback_cell_count": 0
+    },
+    {
+      "segment_id": 14,
+      "name_hint": "right_internal_iliac",
+      "segment_type": "terminal_branch",
+      "parent_segment_id": 10,
+      "child_segment_ids": [],
+      "proximal_node_id": 7,
+      "distal_node_id": 9,
+      "proximal_point": [
+        3.9931862354278564,
+        15.233983039855957,
+        61.79496383666992
+      ],
+      "distal_point": [
+        3.610574722290039,
+        10.96374797821045,
+        58.71294403076172
+      ],
+      "edge_ids": [
+        14
+      ],
+      "length": 5.895855865420085,
+      "terminal_face_id": 9,
+      "terminal_face_name": "right_internal_iliac",
+      "descendant_terminal_names": [
+        "right_internal_iliac"
+      ],
+      "cell_count": 3989,
+      "fallback_cell_count": 0
+    }
+  ],
+  "boundary_summary": {
+    "aorta_start": {
+      "source_type": "face_map_model_face",
+      "face_id": 2,
+      "centroid": [
+        -1.4198260467905244,
+        13.00392460465364,
+        87.3409955234283
+      ],
+      "normal": [
+        0.30927342443780625,
+        0.264926216978239,
+        -0.9133258172712033
+      ],
+      "area": 4.610100374094678,
+      "equivalent_diameter": 2.422759191809147,
+      "major_diameter": 2.458891730061375,
+      "minor_diameter": 2.4535076316639093,
+      "cell_count": 990,
+      "confidence": 0.95,
+      "source": "face_partition:ModelFaceID:2"
+    },
+    "aorta_end_pre_bifurcation": {
+      "centerline_landmark": {
+        "name": "aorta_end_pre_bifurcation",
+        "node_id": 4,
+        "point": [
+          -1.0228465795516968,
+          17.346933364868164,
+          65.88009643554688
+        ],
+        "source_type": "step1_centerline_topology",
+        "confidence": 0.9,
+        "resolution_detail": {
+          "method": "deepest_common_node_across_mapped_iliac_routes",
+          "used_iliac_faces": [
+            {
+              "face_id": 5,
+              "face_name": "left_external_iliac",
+              "terminal_node_id": 6
+            },
+            {
+              "face_id": 8,
+              "face_name": "left_internal_iliac",
+              "terminal_node_id": 13
+            },
+            {
+              "face_id": 6,
+              "face_name": "right_external_iliac",
+              "terminal_node_id": 8
+            },
+            {
+              "face_id": 9,
+              "face_name": "right_internal_iliac",
+              "terminal_node_id": 9
+            }
+          ],
+          "missing_iliac_names": [],
+          "path_count": 4
+        }
+      },
+      "bifurcation_point": [
+        -1.0228465795516968,
+        17.346933364868164,
+        65.88009643554688
+      ],
+      "boundary_centroid": [
+        -1.3184803071267464,
+        17.217301689276173,
+        66.40982683967141
+      ],
+      "boundary_normal": [
+        0.3938315949782886,
+        -0.0030903425317977966,
+        -0.9191774173574401
+      ],
+      "area": 6.0681877203602195,
+      "equivalent_diameter": 2.7796144643527367,
+      "major_diameter": 2.8330358775386575,
+      "minor_diameter": 2.8176317965808177,
+      "surface_boundary_profile": {
+        "surface_derived": true,
+        "extraction_method": "surface_plane_cut_pre_bifurcation",
+        "section_offset_from_bifurcation_mm": 0.6056897979522867,
+        "section_arclength": 22.923038028653995,
+        "boundary_centroid": [
+          -1.3184803071267464,
+          17.217301689276173,
+          66.40982683967141
+        ],
+        "boundary_normal": [
+          0.3938315949782886,
+          -0.0030903425317977966,
+          -0.9191774173574401
+        ],
+        "area": 6.0681877203602195,
+        "equivalent_diameter": 2.7796144643527367,
+        "major_diameter": 2.8330358775386575,
+        "minor_diameter": 2.8176317965808177,
+        "rms_planarity": 1.9306361053044925e-06,
+        "closed_gap": 0.0,
+        "point_count": 119,
+        "confidence": 0.9,
+        "attempts": [
+          {
+            "offset_from_bifurcation_mm": 0.6056897979522867,
+            "section_arclength": 22.923038028653995,
+            "candidate_count": 1
+          }
+        ]
+      },
+      "local_tangent": [
+        0.44844278445301294,
+        0.06409396213827732,
+        -0.8915105344803536
+      ],
+      "confidence": 0.9,
+      "extraction_method": "centerline_common_iliac_routes_plus_surface_plane_cut",
+      "surface_derived": true,
+      "centerline_derived": true,
+      "source_components": [
+        "centerline_landmark",
+        "surface_derived_boundary_profile"
+      ]
+    },
+    "mapped_terminal_boundaries": [
+      {
+        "face_id": 2,
+        "face_name": "abdominal_aorta_inlet",
+        "terminal_node_id": 0,
+        "center": [
+          -1.4198260467905264,
+          13.00392460465366,
+          87.34099552342846
+        ],
+        "area": 4.610100368711204,
+        "equivalent_diameter": 2.422759190394551,
+        "normal": [
+          0.3092734244378063,
+          0.26492621697823904,
+          -0.9133258172712035
+        ],
+        "source": "face_partition:ModelFaceID:2",
+        "confidence": 0.9
+      },
+      {
+        "face_id": 3,
+        "face_name": "celiac_branch",
+        "terminal_node_id": 14,
+        "center": [
+          1.8023549270050683,
+          22.373471677580206,
+          79.32012915291216
+        ],
+        "area": 0.20152505903597492,
+        "equivalent_diameter": 0.5065468136507143,
+        "normal": [
+          0.007135386295336625,
+          0.4565757891985125,
+          -0.8896559081915726
+        ],
+        "source": "face_partition:ModelFaceID:3",
+        "confidence": 0.9
+      },
+      {
+        "face_id": 4,
+        "face_name": "celiac_artery",
+        "terminal_node_id": 12,
+        "center": [
+          -2.318370042171279,
+          19.49508574779824,
+          81.71461982587046
+        ],
+        "area": 0.35899253543840615,
+        "equivalent_diameter": 0.6760795015269417,
+        "normal": [
+          -0.9323101120192698,
+          0.15639566465541244,
+          0.3260954631754457
+        ],
+        "source": "face_partition:ModelFaceID:4",
+        "confidence": 0.9
+      },
+      {
+        "face_id": 5,
+        "face_name": "left_external_iliac",
+        "terminal_node_id": 6,
+        "center": [
+          -8.695407437158641,
+          18.291281920182417,
+          50.924651818783296
+        ],
+        "area": 0.7954399260300739,
+        "equivalent_diameter": 1.0063724803882024,
+        "normal": [
+          0.18867089702802886,
+          0.24699063515202,
+          0.9504729973870067
+        ],
+        "source": "face_partition:ModelFaceID:5",
+        "confidence": 0.9
+      },
+      {
+        "face_id": 6,
+        "face_name": "right_external_iliac",
+        "terminal_node_id": 8,
+        "center": [
+          7.7375377325013694,
+          19.747747517896578,
+          51.0600925286637
+        ],
+        "area": 0.6208363700770105,
+        "equivalent_diameter": 0.8890857198222699,
+        "normal": [
+          -0.03374724461477661,
+          -0.12527339030306772,
+          -0.9915481335582684
+        ],
+        "source": "face_partition:ModelFaceID:6",
+        "confidence": 0.9
+      },
+      {
+        "face_id": 7,
+        "face_name": "inferior_mesenteric_artery",
+        "terminal_node_id": 17,
+        "center": [
+          -2.3337307734609873,
+          19.39609335162334,
+          67.04729944706735
+        ],
+        "area": 0.10986745903058491,
+        "equivalent_diameter": 0.3740154990335442,
+        "normal": [
+          0.45319503576522213,
+          0.3501372323224981,
+          0.8197671487070582
+        ],
+        "source": "face_partition:ModelFaceID:7",
+        "confidence": 0.9
+      },
+      {
+        "face_id": 8,
+        "face_name": "left_internal_iliac",
+        "terminal_node_id": 13,
+        "center": [
+          -3.337721687626924,
+          10.734690828248596,
+          58.79562311685544
+        ],
+        "area": 0.20653953644561698,
+        "equivalent_diameter": 0.5128102040266251,
+        "normal": [
+          -0.2590802325165794,
+          -0.824745496042171,
+          0.5026651966043688
+        ],
+        "source": "face_partition:ModelFaceID:8",
+        "confidence": 0.9
+      },
+      {
+        "face_id": 9,
+        "face_name": "right_internal_iliac",
+        "terminal_node_id": 9,
+        "center": [
+          3.5692395359798663,
+          10.964354712542226,
+          58.68559788839325
+        ],
+        "area": 0.4430831719543067,
+        "equivalent_diameter": 0.7510998709485399,
+        "normal": [
+          -0.4781753367153999,
+          0.48306846030821193,
+          0.7334802042404196
+        ],
+        "source": "face_partition:ModelFaceID:9",
+        "confidence": 0.9
+      },
+      {
+        "face_id": 10,
+        "face_name": "left_renal_artery",
+        "terminal_node_id": 16,
+        "center": [
+          -7.54030142611478,
+          13.970893293227393,
+          76.40423514733412
+        ],
+        "area": 0.14925897689011075,
+        "equivalent_diameter": 0.4359385642303291,
+        "normal": [
+          -0.7712949638665318,
+          -0.6350782575421305,
+          -0.04218631900719555
+        ],
+        "source": "face_partition:ModelFaceID:10",
+        "confidence": 0.9
+      },
+      {
+        "face_id": 11,
+        "face_name": "right_renal_artery",
+        "terminal_node_id": 15,
+        "center": [
+          3.9952024381887754,
+          14.508980974026782,
+          77.5634892714932
+        ],
+        "area": 0.16396703876617374,
+        "equivalent_diameter": 0.4569128120223987,
+        "normal": [
+          -0.6765084048400108,
+          0.2101225972825847,
+          -0.7058221251080509
+        ],
+        "source": "face_partition:ModelFaceID:11",
+        "confidence": 0.9
+      },
+      {
+        "face_id": 12,
+        "face_name": "superior_mesenteric_artery",
+        "terminal_node_id": 10,
+        "center": [
+          -2.339283577762564,
+          21.21704600663667,
+          74.10339492458365
+        ],
+        "area": 0.4229821952606114,
+        "equivalent_diameter": 0.7338648770207638,
+        "normal": [
+          0.1268709272292111,
+          -0.12656152323080044,
+          -0.983811947813961
+        ],
+        "source": "face_partition:ModelFaceID:12",
+        "confidence": 0.9
+      }
+    ]
+  },
+  "fallback_summary": {
+    "fallback_assigned_cells": 0,
+    "fallback_percentage": 0.0,
+    "priority_region_fallback_authored": false,
+    "policy": {
+      "requires_review_gt": 0.05,
+      "failed_gt": 0.15,
+      "priority_regions_force_review": [
+        "aortic_inlet",
+        "aortic_bifurcation",
+        "renal_origins",
+        "iliac_split_boundaries"
+      ]
+    }
+  },
+  "qa_summary": {
+    "total_surface_cells": 231992,
+    "assigned_cells": 231992,
+    "unassigned_cells": 0,
+    "fallback_assigned_cells": 0,
+    "fallback_percentage": 0.0,
+    "assignment_mode_counts": {
+      "face_terminal_override": 6719,
+      "inlet_face_override": 990,
+      "nearest_centerline": 224283,
+      "fallback": 0
+    },
+    "non_empty_segment_count": 14,
+    "segment_count": 14,
+    "aorta_start_confidence": 0.95,
+    "aorta_end_confidence": 0.9,
+    "upstream_step1_warning_count": 10,
+    "step_status": "success"
+  },
+  "warnings": [],
+  "final_status": "success"
+}

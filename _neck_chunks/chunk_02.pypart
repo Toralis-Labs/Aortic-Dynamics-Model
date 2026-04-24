@@ -1,0 +1,300 @@
+) -> List[int]:
+    alias_set = {normalize_name(name) for name in branch_aliases}
+    role_set = {normalize_name(role) for role in (topology_roles or [])}
+    ordered_ids: List[int] = []
+    for row in get_metadata_branch_rows(meta):
+        row_name = normalize_name(row.get("branch_name"))
+        row_role = normalize_name(row.get("topology_role"))
+        row_id = row.get("branch_id")
+        if row_name in alias_set or (role_set and row_role in role_set) or (numeric_label_id is not None and row_id == int(numeric_label_id)):
+            ordered_ids.append(int(row["index"]))
+    return ordered_ids
+
+
+def get_metadata_branch_anchor_entries(meta: Dict[str, Any], branch_aliases: Sequence[str]) -> List[Dict[str, Any]]:
+    anchors = meta.get("branch_proximal_anchors", {})
+    if not isinstance(anchors, dict):
+        return []
+
+    normalized_aliases = {normalize_name(name) for name in branch_aliases}
+    matched_entries: List[Dict[str, Any]] = []
+    for key, value in anchors.items():
+        if normalize_name(key) not in normalized_aliases:
+            continue
+        if isinstance(value, dict):
+            matched_entries.append(dict(value))
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                if isinstance(item, dict):
+                    matched_entries.append(dict(item))
+    return matched_entries
+
+
+def get_xyz_triplet(value: Any) -> Optional[np.ndarray]:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        return None
+    try:
+        return np.array([float(value[0]), float(value[1]), float(value[2])], dtype=float)
+    except Exception:
+        return None
+
+
+def format_mm(x: float) -> str:
+    return "nan" if not math.isfinite(x) else f"{x:.3f}"
+
+
+def join_warnings(warnings: Sequence[str]) -> str:
+    clean = [str(w).replace("\n", " ").strip() for w in warnings if str(w).strip()]
+    return " | ".join(clean)
+
+
+def build_polyline_path(points: np.ndarray, point_ids: List[int], cell_ids: List[int]) -> PolylinePath:
+    pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    if pts.shape[0] < 2:
+        raise RuntimeError("Polyline path needs at least 2 points.")
+    s = np.zeros(pts.shape[0], dtype=float)
+    s[1:] = np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))
+    return PolylinePath(points=pts, point_ids=list(point_ids), cumulative_s=s, cell_ids=list(cell_ids))
+
+
+def reverse_path(path: PolylinePath) -> PolylinePath:
+    pts = path.points[::-1].copy()
+    point_ids = list(reversed(path.point_ids))
+    s = np.zeros(len(pts), dtype=float)
+    if len(pts) > 1:
+        s[1:] = np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))
+    return PolylinePath(points=pts, point_ids=point_ids, cumulative_s=s, cell_ids=list(reversed(path.cell_ids)))
+
+
+def polyline_length(path: PolylinePath) -> float:
+    return float(path.cumulative_s[-1]) if path.cumulative_s.size else 0.0
+
+
+def find_stitched_index_for_point_id(path: PolylinePath, point_id: int) -> Optional[int]:
+    try:
+        return path.point_ids.index(int(point_id))
+    except ValueError:
+        return None
+
+
+def project_point_to_segment(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> Tuple[np.ndarray, float, float]:
+    ab = b - a
+    denom = float(np.dot(ab, ab))
+    if denom < EPS:
+        return a.copy(), 0.0, float(np.linalg.norm(p - a))
+    t = float(np.dot(p - a, ab) / denom)
+    t = clamp(t, 0.0, 1.0)
+    q = a + t * ab
+    d = float(np.linalg.norm(p - q))
+    return q, t, d
+
+
+def project_point_to_polyline(path: PolylinePath, p: np.ndarray) -> Dict[str, Any]:
+    point = np.asarray(p, dtype=float).reshape(3)
+    pts = path.points
+    best: Dict[str, Any] = {
+        "distance_mm": float("inf"),
+        "s_abs_mm": 0.0,
+        "segment_index": 0,
+        "segment_t": 0.0,
+        "projected_xyz": pts[0].copy(),
+    }
+    for i in range(len(pts) - 1):
+        q, t, d = project_point_to_segment(point, pts[i], pts[i + 1])
+        if d < best["distance_mm"]:
+            seg_len = float(np.linalg.norm(pts[i + 1] - pts[i]))
+            best = {
+                "distance_mm": d,
+                "s_abs_mm": float(path.cumulative_s[i] + t * seg_len),
+                "segment_index": i,
+                "segment_t": t,
+                "projected_xyz": q,
+            }
+    return best
+
+
+def interpolate_point_on_path(path: PolylinePath, s_abs_mm: float) -> np.ndarray:
+    s = float(clamp(s_abs_mm, 0.0, polyline_length(path)))
+    pts = path.points
+    if s <= 0.0:
+        return pts[0].copy()
+    if s >= polyline_length(path):
+        return pts[-1].copy()
+    idx = int(np.searchsorted(path.cumulative_s, s, side="right") - 1)
+    idx = max(0, min(idx, len(pts) - 2))
+    s0 = float(path.cumulative_s[idx])
+    s1 = float(path.cumulative_s[idx + 1])
+    if s1 - s0 < EPS:
+        return pts[idx].copy()
+    t = (s - s0) / (s1 - s0)
+    return (1.0 - t) * pts[idx] + t * pts[idx + 1]
+
+
+def evaluate_path_point_and_tangent(path: PolylinePath, s_abs_mm: float, ds_mm: float = 0.5) -> Tuple[np.ndarray, np.ndarray]:
+    s = float(clamp(s_abs_mm, 0.0, polyline_length(path)))
+    p = interpolate_point_on_path(path, s)
+    s_lo = max(0.0, s - ds_mm)
+    s_hi = min(polyline_length(path), s + ds_mm)
+    if s_hi - s_lo < 1.0e-6:
+        if s < polyline_length(path):
+            p2 = interpolate_point_on_path(path, min(polyline_length(path), s + max(ds_mm, 1.0)))
+            t = unit(p2 - p)
+        else:
+            p1 = interpolate_point_on_path(path, max(0.0, s - max(ds_mm, 1.0)))
+            t = unit(p - p1)
+    else:
+        p_lo = interpolate_point_on_path(path, s_lo)
+        p_hi = interpolate_point_on_path(path, s_hi)
+        t = unit(p_hi - p_lo)
+    if np.linalg.norm(t) < EPS:
+        idx = int(np.searchsorted(path.cumulative_s, s, side="right") - 1)
+        idx = max(0, min(idx, len(path.points) - 2))
+        t = unit(path.points[idx + 1] - path.points[idx])
+    if np.linalg.norm(t) < EPS:
+        raise RuntimeError("Failed to evaluate a valid trunk tangent.")
+    return p, t
+
+
+def choose_cell_label_array(pd: vtk.vtkPolyData) -> Tuple[Optional[str], Optional[str]]:
+    cd = pd.GetCellData()
+    string_name = find_array_name(cd, ["BranchName", "BranchLabelName", "AnatomicalName"])
+    numeric_name = find_array_name(cd, ["BranchId", "BranchLabelId", "AnatomicalLabelId"])
+    if string_name is None:
+        string_name = find_array_name(cd, [], contains_tokens=["branch", "name"])
+    if numeric_name is None:
+        numeric_name = find_array_name(cd, [], contains_tokens=["branch", "id"])
+    return string_name, numeric_name
+
+
+def choose_geometry_type_arrays(pd: vtk.vtkPolyData) -> Tuple[Optional[str], Optional[str]]:
+    cd = pd.GetCellData()
+    string_name = find_array_name(cd, ["GeometryType", "GeometryTypeName"])
+    numeric_name = find_array_name(cd, ["GeometryTypeId"])
+    if string_name is None:
+        string_name = find_array_name(cd, [], contains_tokens=["geometry", "type"])
+    return string_name, numeric_name
+
+
+def extract_centerline_polylines(pd: vtk.vtkPolyData, meta: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    string_label_name, numeric_label_name = choose_cell_label_array(pd)
+    string_values = get_cell_string_values(pd, string_label_name) if string_label_name else []
+    numeric_values = get_cell_numeric_values(pd, numeric_label_name) if numeric_label_name else [0.0] * pd.GetNumberOfCells()
+    metadata_rows_by_index = get_metadata_branch_rows_by_index(meta or {})
+
+    polylines: List[Dict[str, Any]] = []
+    for ci in range(pd.GetNumberOfCells()):
+        cell = pd.GetCell(ci)
+        if cell is None:
+            continue
+        if cell.GetCellType() not in (vtk.VTK_POLY_LINE, vtk.VTK_LINE):
+            continue
+        ids = [int(cell.GetPointId(k)) for k in range(cell.GetNumberOfPoints())]
+        if len(ids) < 2:
+            continue
+        pts = np.array([pd.GetPoint(pid) for pid in ids], dtype=float)
+        label_name = string_values[ci] if ci < len(string_values) else ""
+        label_id = int(round(numeric_values[ci])) if ci < len(numeric_values) else 0
+        meta_row = metadata_rows_by_index.get(int(ci), {})
+        if not normalize_name(label_name):
+            meta_name = meta_row.get("branch_name")
+            if meta_name is not None:
+                label_name = str(meta_name)
+        if int(label_id) == 0:
+            meta_label_id = meta_row.get("branch_id")
+            if meta_label_id is not None:
+                label_id = int(meta_label_id)
+        polylines.append(
+            {
+                "cell_id": int(ci),
+                "point_ids": ids,
+                "points": pts,
+                "label_name": str(label_name),
+                "label_id": int(label_id),
+                "topology_role": str(meta_row.get("topology_role", "")),
+            }
+        )
+    if not polylines:
+        raise RuntimeError("No centerline polyline cells found in oriented scaffold.")
+    return polylines
+
+
+def select_polylines_by_label(
+    polylines: Sequence[Dict[str, Any]],
+    aliases: Sequence[str],
+    numeric_label_id: Optional[int],
+    topology_roles: Optional[Sequence[str]] = None,
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    alias_set = {normalize_name(a) for a in aliases}
+    role_set = {normalize_name(role) for role in (topology_roles or [])}
+    for item in polylines:
+        label_name = normalize_name(item.get("label_name"))
+        label_id = int(item.get("label_id", -999))
+        topology_role = normalize_name(item.get("topology_role"))
+        if (
+            label_name in alias_set
+            or (numeric_label_id is not None and label_id == int(numeric_label_id))
+            or (role_set and topology_role in role_set)
+        ):
+            out.append(item)
+    return out
+
+
+def point_or_coord_from_landmark(
+    pd: vtk.vtkPolyData,
+    path: PolylinePath,
+    field_pid: Optional[int],
+    meta_xyz: Optional[np.ndarray],
+    label: str,
+    warnings: List[str],
+    prefer_metadata: bool = True,
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "source": "unresolved",
+        "s_abs_mm": float("nan"),
+        "xyz": None,
+        "scaffold_point_id": None,
+        "nearest_trunk_point_id": None,
+    }
+    field_xyz = None
+    field_result: Optional[Dict[str, Any]] = None
+    if field_pid is not None and 0 <= int(field_pid) < pd.GetNumberOfPoints():
+        field_xyz = np.array(pd.GetPoint(int(field_pid)), dtype=float)
+        idx = find_stitched_index_for_point_id(path, int(field_pid))
+        if idx is not None:
+            field_result = {
+                "source": "centerline_field_point_id",
+                "s_abs_mm": float(path.cumulative_s[idx]),
+                "xyz": field_xyz,
+                "scaffold_point_id": int(field_pid),
+                "nearest_trunk_point_id": int(path.point_ids[idx]),
+            }
+        else:
+            proj = project_point_to_polyline(path, field_xyz)
+            nearest_idx = int(np.argmin(np.linalg.norm(path.points - field_xyz.reshape(1, 3), axis=1)))
+            field_result = {
+                "source": "centerline_field_point_id_projected",
+                "s_abs_mm": float(proj["s_abs_mm"]),
+                "xyz": field_xyz,
+                "scaffold_point_id": int(field_pid),
+                "nearest_trunk_point_id": int(path.point_ids[nearest_idx]),
+            }
+
+    meta_result: Optional[Dict[str, Any]] = None
+    if meta_xyz is not None:
+        proj_meta = project_point_to_polyline(path, meta_xyz)
+        nearest_idx = int(np.argmin(np.linalg.norm(path.points - meta_xyz.reshape(1, 3), axis=1)))
+        meta_result = {
+            "source": "metadata_landmark_coord",
+            "s_abs_mm": float(proj_meta["s_abs_mm"]),
+            "xyz": np.asarray(meta_xyz, dtype=float),
+            "scaffold_point_id": None,
+            "nearest_trunk_point_id": int(path.point_ids[nearest_idx]),
+        }
+
+    if meta_result is not None and field_xyz is not None:
+        mismatch = float(np.linalg.norm(np.asarray(meta_xyz, dtype=float) - field_xyz))
+        if mismatch > 1.0:
+            warnings.append(
+                f"W_{label.upper()}_FIELD_METADATA_MISMATCH: metadata landmark differs from scaffold point by {mismatch:.3f} mm; metadata was preferred."
+                if prefer_metadata

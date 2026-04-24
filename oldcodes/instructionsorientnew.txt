@@ -1,0 +1,15 @@
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
+& "C:\Users\ibrah\miniconda3\shell\condabin\conda-hook.ps1"
+
+conda activate vmtk_env
+
+Set-Location "C:\Users\ibrah\OneDrive\Desktop\Fluids Project\Vascular specific"
+
+$env:CONDA_DLL_SEARCH_MODIFICATION_ENABLE="1"
+
+python .\orientnew.py
+
+python .\orientnew_surface_transfer_candidate.py
+
+python .\orienting#3cleanede.py

@@ -1,0 +1,300 @@
+def stitch_polylines(
+    polylines: Sequence[Dict[str, Any]],
+    start_xyz: Optional[np.ndarray],
+    end_xyz: Optional[np.ndarray],
+    warnings: List[str],
+    endpoint_tol_mm: float = 1.0e-3,
+) -> PolylinePath:
+    if not polylines:
+        raise RuntimeError("No polylines were supplied for stitching.")
+    if len(polylines) == 1:
+        item = polylines[0]
+        path = build_polyline_path(item["points"], item["point_ids"], [int(item["cell_id"])])
+        if start_xyz is not None and np.linalg.norm(path.points[-1] - start_xyz.reshape(3)) < np.linalg.norm(path.points[0] - start_xyz.reshape(3)):
+            path = reverse_path(path)
+        return path
+
+    remaining: List[Dict[str, Any]] = []
+    for item in polylines:
+        remaining.append(
+            {
+                "cell_id": int(item["cell_id"]),
+                "point_ids": list(item["point_ids"]),
+                "points": np.array(item["points"], dtype=float),
+            }
+        )
+
+    if start_xyz is None:
+        start_index = 0
+        start_reverse = False
+    else:
+        best: Optional[Tuple[float, int, bool]] = None
+        for i, item in enumerate(remaining):
+            p0 = item["points"][0]
+            p1 = item["points"][-1]
+            d0 = float(np.linalg.norm(p0 - start_xyz))
+            d1 = float(np.linalg.norm(p1 - start_xyz))
+            candidate = (min(d0, d1), i, d1 < d0)
+            if best is None or candidate[0] < best[0]:
+                best = candidate
+        assert best is not None
+        start_index = best[1]
+        start_reverse = best[2]
+
+    item0 = remaining.pop(start_index)
+    if start_reverse:
+        item0["points"] = item0["points"][::-1].copy()
+        item0["point_ids"] = list(reversed(item0["point_ids"]))
+
+    stitched_points = [np.array(p, dtype=float) for p in item0["points"]]
+    stitched_ids = list(item0["point_ids"])
+    stitched_cell_ids = [int(item0["cell_id"])]
+
+    while remaining:
+        tail = stitched_points[-1]
+        best_next: Optional[Tuple[float, int, bool]] = None
+        for i, item in enumerate(remaining):
+            d_start = float(np.linalg.norm(item["points"][0] - tail))
+            d_end = float(np.linalg.norm(item["points"][-1] - tail))
+            use_reverse = d_end < d_start
+            d_best = min(d_start, d_end)
+            candidate = (d_best, i, use_reverse)
+            if best_next is None or d_best < best_next[0]:
+                best_next = candidate
+        assert best_next is not None
+        gap_mm, next_index, use_reverse = best_next
+        next_item = remaining.pop(next_index)
+        next_points = np.array(next_item["points"], dtype=float)
+        next_ids = list(next_item["point_ids"])
+        if use_reverse:
+            next_points = next_points[::-1].copy()
+            next_ids = list(reversed(next_ids))
+        if gap_mm > endpoint_tol_mm:
+            warnings.append(
+                f"W_TRUNK_STITCH_GAP: trunk sub-paths were stitched across a {gap_mm:.6f} mm endpoint gap."
+            )
+        start_j = 1 if float(np.linalg.norm(next_points[0] - tail)) <= max(endpoint_tol_mm, 1.0e-9) else 0
+        for p, pid in zip(next_points[start_j:], next_ids[start_j:]):
+            stitched_points.append(np.array(p, dtype=float))
+            stitched_ids.append(int(pid))
+        stitched_cell_ids.append(int(next_item["cell_id"]))
+
+    path = build_polyline_path(np.vstack(stitched_points), stitched_ids, stitched_cell_ids)
+
+    if start_xyz is not None and end_xyz is not None:
+        d_forward = float(np.linalg.norm(path.points[0] - start_xyz) + np.linalg.norm(path.points[-1] - end_xyz))
+        d_reverse = float(np.linalg.norm(path.points[-1] - start_xyz) + np.linalg.norm(path.points[0] - end_xyz))
+        if d_reverse + 1.0e-9 < d_forward:
+            path = reverse_path(path)
+    elif start_xyz is not None:
+        if float(np.linalg.norm(path.points[-1] - start_xyz)) < float(np.linalg.norm(path.points[0] - start_xyz)):
+            path = reverse_path(path)
+    return path
+
+
+def resolve_trunk_path(center_pd: vtk.vtkPolyData, meta: Dict[str, Any], warnings: List[str]) -> PolylinePath:
+    polylines = extract_centerline_polylines(center_pd, meta)
+    poly_by_cell_id = {int(item["cell_id"]): item for item in polylines}
+    trunk_polylines = select_polylines_by_label(
+        polylines,
+        sorted(TRUNK_NAME_ALIASES),
+        LABEL_AORTA_TRUNK,
+        topology_roles=["trunk_path"],
+    )
+    if not trunk_polylines:
+        raise RuntimeError("Could not isolate abdominal aorta trunk from oriented centerline scaffold.")
+
+    fd = center_pd.GetFieldData()
+    inlet_field_pid = get_field_point_id(fd, "Inlet")
+    bif_field_pid = get_field_point_id(fd, "Bifurcation")
+    inlet_meta_xyz = get_metadata_landmark_xyz(meta, "Inlet")
+    bif_meta_xyz = get_metadata_landmark_xyz(meta, "Bifurcation")
+
+    inlet_xyz = None
+    bif_xyz = None
+    if inlet_field_pid is not None and 0 <= inlet_field_pid < center_pd.GetNumberOfPoints():
+        inlet_xyz = np.array(center_pd.GetPoint(inlet_field_pid), dtype=float)
+    elif inlet_meta_xyz is not None:
+        inlet_xyz = inlet_meta_xyz
+    if bif_field_pid is not None and 0 <= bif_field_pid < center_pd.GetNumberOfPoints():
+        bif_xyz = np.array(center_pd.GetPoint(bif_field_pid), dtype=float)
+    elif bif_meta_xyz is not None:
+        bif_xyz = bif_meta_xyz
+
+    trunk_cell_order = get_metadata_branch_cell_order(
+        meta,
+        sorted(TRUNK_NAME_ALIASES),
+        LABEL_AORTA_TRUNK,
+        topology_roles=["trunk_path"],
+    )
+    ordered_trunk_polylines = [poly_by_cell_id[cell_id] for cell_id in trunk_cell_order if cell_id in poly_by_cell_id]
+    if trunk_cell_order:
+        ordered_cell_ids_present = {int(item["cell_id"]) for item in ordered_trunk_polylines}
+        for item in sorted(trunk_polylines, key=lambda row: int(row["cell_id"])):
+            if int(item["cell_id"]) not in ordered_cell_ids_present:
+                ordered_trunk_polylines.append(item)
+
+    primary_trunk_sequence = choose_primary_trunk_polyline_sequence(
+        ordered_trunk_polylines if ordered_trunk_polylines else trunk_polylines,
+        inlet_xyz,
+        bif_xyz,
+    )
+
+    if primary_trunk_sequence:
+        if trunk_cell_order and len(primary_trunk_sequence) != len(trunk_cell_order):
+            warnings.append("W_TRUNK_OVERLAP_PRUNED: overlapping trunk scaffold intervals were reduced to the inlet-to-bifurcation path for downstream measurement.")
+        path = concatenate_ordered_polylines(primary_trunk_sequence, inlet_xyz, bif_xyz, warnings)
+    elif trunk_cell_order and ordered_trunk_polylines:
+        if len(ordered_trunk_polylines) != len(trunk_cell_order):
+            warnings.append("W_TRUNK_METADATA_ORDER_PARTIAL: some metadata-ordered trunk segments were missing from the scaffold; available ordered segments were used.")
+        path = concatenate_ordered_polylines(ordered_trunk_polylines, inlet_xyz, bif_xyz, warnings)
+    else:
+        path = stitch_polylines(trunk_polylines, inlet_xyz, bif_xyz, warnings)
+
+    if polyline_length(path) <= 0.0:
+        raise RuntimeError("Resolved trunk polyline has zero length.")
+    return path
+
+
+def resolve_renal_anchor_from_branch(
+    side: str,
+    branch_items: Sequence[Dict[str, Any]],
+    trunk_path: PolylinePath,
+) -> Optional[ResolvedAnchor]:
+    if not branch_items:
+        return None
+    best: Optional[ResolvedAnchor] = None
+    for item in branch_items:
+        pts = np.asarray(item["points"], dtype=float)
+        if pts.shape[0] < 2:
+            continue
+        end0_proj = project_point_to_polyline(trunk_path, pts[0])
+        end1_proj = project_point_to_polyline(trunk_path, pts[-1])
+        use_index = 0 if float(end0_proj["distance_mm"]) <= float(end1_proj["distance_mm"]) else -1
+        prox_point = pts[use_index]
+        proj = end0_proj if use_index == 0 else end1_proj
+        nearest_idx = int(np.argmin(np.linalg.norm(trunk_path.points - prox_point.reshape(1, 3), axis=1)))
+        candidate = ResolvedAnchor(
+            side=side,
+            source=f"{side}_renal_branch_projection",
+            trunk_s_mm=float(proj["s_abs_mm"]),
+            point_xyz=np.asarray(prox_point, dtype=float),
+            scaffold_point_id=int(item["point_ids"][use_index]),
+            nearest_trunk_point_id=int(trunk_path.point_ids[nearest_idx]),
+        )
+        if best is None or candidate.trunk_s_mm < best.trunk_s_mm:
+            best = candidate
+    return best
+
+
+def resolve_renal_anchor_from_metadata_branch(
+    side: str,
+    meta: Dict[str, Any],
+    branch_aliases: Sequence[str],
+    trunk_path: PolylinePath,
+    warnings: List[str],
+    landmark_key: Optional[str] = None,
+) -> Optional[ResolvedAnchor]:
+    best: Optional[Tuple[Tuple[float, float, float], ResolvedAnchor]] = None
+    entries = get_metadata_branch_anchor_entries(meta, branch_aliases)
+    if not entries:
+        return None
+
+    landmark_xyz = get_metadata_landmark_xyz(meta, landmark_key) if landmark_key else None
+    for entry in entries:
+        point_candidates: List[Tuple[str, np.ndarray]] = []
+        geometric_point = get_xyz_triplet(entry.get("geometric_origin_point"))
+        topological_point = get_xyz_triplet(entry.get("topological_start_point"))
+        if geometric_point is not None:
+            point_candidates.append(("metadata_branch_geometric_origin", geometric_point))
+        if topological_point is not None:
+            point_candidates.append(("metadata_branch_topological_start", topological_point))
+        for source_name, xyz in point_candidates:
+            proj = project_point_to_polyline(trunk_path, xyz)
+            nearest_idx = int(np.argmin(np.linalg.norm(trunk_path.points - xyz.reshape(1, 3), axis=1)))
+            parent_projection_distance = safe_float(entry.get("parent_projection_distance"), float("inf"))
+            candidate = ResolvedAnchor(
+                side=side,
+                source=source_name,
+                trunk_s_mm=float(proj["s_abs_mm"]),
+                point_xyz=np.asarray(xyz, dtype=float),
+                scaffold_point_id=None,
+                nearest_trunk_point_id=int(trunk_path.point_ids[nearest_idx]),
+            )
+            discrepancy = float(np.linalg.norm(xyz - landmark_xyz)) if landmark_xyz is not None else 0.0
+            if discrepancy > 1.0 and geometric_point is not None and landmark_key:
+                warnings.append(
+                    f"W_{landmark_key.upper()}_ANCHOR_MISMATCH: branch proximal anchor differs from metadata landmark by {discrepancy:.3f} mm; branch proximal anchor was preferred."
+                )
+                landmark_xyz = None
+            rank = (
+                0.0 if source_name == "metadata_branch_geometric_origin" else 1.0,
+                parent_projection_distance if math.isfinite(parent_projection_distance) else 1.0e9,
+                discrepancy,
+            )
+            if best is None or rank < best[0]:
+                best = (rank, candidate)
+    return None if best is None else best[1]
+
+
+def resolve_renal_anchors(
+    center_pd: vtk.vtkPolyData,
+    meta: Dict[str, Any],
+    trunk_path: PolylinePath,
+    warnings: List[str],
+) -> Dict[str, Optional[ResolvedAnchor]]:
+    fd = center_pd.GetFieldData()
+    polylines = extract_centerline_polylines(center_pd, meta)
+    right_branches = select_polylines_by_label(polylines, sorted(RIGHT_RENAL_ALIASES), LABEL_RIGHT_RENAL)
+    left_branches = select_polylines_by_label(polylines, sorted(LEFT_RENAL_ALIASES), LABEL_LEFT_RENAL)
+
+    resolved: Dict[str, Optional[ResolvedAnchor]] = {"right": None, "left": None}
+    for side, branch_items, branch_aliases in (
+        ("right", right_branches, sorted(RIGHT_RENAL_ALIASES)),
+        ("left", left_branches, sorted(LEFT_RENAL_ALIASES)),
+    ):
+        key = "RightRenalOrigin" if side == "right" else "LeftRenalOrigin"
+        branch_anchor = resolve_renal_anchor_from_metadata_branch(side, meta, branch_aliases, trunk_path, warnings, landmark_key=key)
+        if branch_anchor is not None:
+            resolved[side] = branch_anchor
+            continue
+
+        field_pid = get_field_point_id(fd, key)
+        meta_xyz = get_metadata_landmark_xyz(meta, key)
+
+        landmark_info = point_or_coord_from_landmark(
+            center_pd,
+            trunk_path,
+            field_pid,
+            meta_xyz,
+            key,
+            warnings,
+            prefer_metadata=True,
+        )
+        if landmark_info["source"] != "unresolved":
+            resolved[side] = ResolvedAnchor(
+                side=side,
+                source=str(landmark_info["source"]),
+                trunk_s_mm=float(landmark_info["s_abs_mm"]),
+                point_xyz=np.asarray(landmark_info["xyz"], dtype=float),
+                scaffold_point_id=landmark_info["scaffold_point_id"],
+                nearest_trunk_point_id=landmark_info["nearest_trunk_point_id"],
+            )
+            continue
+
+        field_only_info = point_or_coord_from_landmark(
+            center_pd,
+            trunk_path,
+            field_pid,
+            None,
+            key,
+            warnings,
+            prefer_metadata=False,
+        )
+        if field_only_info["source"] != "unresolved":
+            resolved[side] = ResolvedAnchor(
+                side=side,
+                source=str(field_only_info["source"]),
+                trunk_s_mm=float(field_only_info["s_abs_mm"]),
+                point_xyz=np.asarray(field_only_info["xyz"], dtype=float),
+                scaffold_point_id=field_only_info["scaffold_point_id"],

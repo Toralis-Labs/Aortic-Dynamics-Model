@@ -1,0 +1,2 @@
+[console_scripts]
+toralis_evar = toralis.cli:main

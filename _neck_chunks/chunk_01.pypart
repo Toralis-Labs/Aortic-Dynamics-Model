@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import sys
+import traceback
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+import vtk  # type: ignore
+
+
+INPUT_CENTERLINES_VTP_PATH = r"C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\Output files\\oriented_labeled_centerlines.vtp"
+INPUT_SURFACE_WITH_CENTERLINES_VTP_PATH = r"C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\Output files\\oriented_surface_with_centerlines.vtp"
+INPUT_METADATA_JSON_PATH = r"C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\Output files\\oriented_labeled_centerlines_metadata.json"
+OUTPUT_COLORED_VTP_PATH = r"C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\Output files\\infrarenal_neck_colored.vtp"
+OUTPUT_REPORT_TXT_PATH = r"C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\Output files\\infrarenal_neck_report.txt"
+
+
+EPS = 1.0e-12
+LABEL_AORTA_TRUNK = 1
+LABEL_RIGHT_RENAL = 5
+LABEL_LEFT_RENAL = 6
+GEOMETRY_TYPE_SURFACE = 1
+GEOMETRY_TYPE_CENTERLINE = 2
+TRUNK_DIRECTION_REVERSED_WARNING = "W_TRUNK_DIRECTION_REVERSED_FOR_INFRarenal_ANALYSIS"
+
+TRUNK_PRIMARY_NAME = "abdominal_aorta_trunk"
+RIGHT_RENAL_PRIMARY_NAME = "right_renal_artery"
+LEFT_RENAL_PRIMARY_NAME = "left_renal_artery"
+TRUNK_NAME_ALIASES = {
+    TRUNK_PRIMARY_NAME,
+    "abdominalaortatrunk",
+    "aortatrunk",
+    "trunk",
+}
+RIGHT_RENAL_ALIASES = {RIGHT_RENAL_PRIMARY_NAME, "right_renal", "rightrenal", "renalright"}
+LEFT_RENAL_ALIASES = {LEFT_RENAL_PRIMARY_NAME, "left_renal", "leftrenal", "renalleft"}
+
+
+@dataclass
+class PolylinePath:
+    points: np.ndarray
+    point_ids: List[int]
+    cumulative_s: np.ndarray
+    cell_ids: List[int]
+
+
+@dataclass
+class ResolvedAnchor:
+    side: str
+    source: str
+    trunk_s_mm: float
+    point_xyz: np.ndarray
+    scaffold_point_id: Optional[int]
+    nearest_trunk_point_id: Optional[int]
+
+
+@dataclass
+class SliceMeasurement:
+    sample_s_abs_mm: float
+    origin_xyz: np.ndarray
+    tangent_xyz: np.ndarray
+    basis_u_xyz: np.ndarray
+    basis_v_xyz: np.ndarray
+    contour_2d: np.ndarray
+    contour_3d: np.ndarray
+    area_mm2: float
+    major_mm: float
+    minor_mm: float
+    eq_mm: float
+    contains_origin: bool
+
+
+def unit(v: np.ndarray) -> np.ndarray:
+    vv = np.asarray(v, dtype=float).reshape(-1)
+    n = float(np.linalg.norm(vv))
+    if n < EPS:
+        return np.zeros_like(vv, dtype=float)
+    return (vv / n).astype(float)
+
+
+def clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+
+def safe_float(x: Any, default: float = float("nan")) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+
+def normalize_name(name: Optional[str]) -> str:
+    if name is None:
+        return ""
+    return "".join(ch.lower() for ch in str(name) if ch.isalnum() or ch == "_")
+
+
+def ensure_parent_dir(path: str) -> None:
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+
+def load_json(path: str) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Metadata JSON must decode to an object: {path}")
+    return data
+
+
+def load_vtp(path: str) -> vtk.vtkPolyData:
+    reader = vtk.vtkXMLPolyDataReader()
+    reader.SetFileName(path)
+    reader.Update()
+    out = reader.GetOutput()
+    if out is None or out.GetNumberOfPoints() < 1:
+        raise RuntimeError(f"Failed to read VTP or VTP is empty: {path}")
+    pd = vtk.vtkPolyData()
+    pd.DeepCopy(out)
+    return pd
+
+
+def write_vtp(pd: vtk.vtkPolyData, path: str, binary: bool = True) -> None:
+    ensure_parent_dir(path)
+    writer = vtk.vtkXMLPolyDataWriter()
+    writer.SetFileName(path)
+    writer.SetInputData(pd)
+    if binary:
+        writer.SetDataModeToBinary()
+    else:
+        writer.SetDataModeToAscii()
+    if writer.Write() != 1:
+        raise RuntimeError(f"Failed to write VTP: {path}")
+
+
+def clone_polydata(pd: vtk.vtkPolyData) -> vtk.vtkPolyData:
+    out = vtk.vtkPolyData()
+    out.DeepCopy(pd)
+    return out
+
+
+def iter_array_names(attrs: Any) -> List[str]:
+    names: List[str] = []
+    if attrs is None:
+        return names
+    for i in range(attrs.GetNumberOfArrays()):
+        arr = attrs.GetAbstractArray(i)
+        if arr is None:
+            continue
+        name = arr.GetName()
+        if name:
+            names.append(str(name))
+    return names
+
+
+def find_array_name(
+    attrs: Any,
+    preferred_names: Sequence[str],
+    contains_tokens: Optional[Sequence[str]] = None,
+) -> Optional[str]:
+    name_map = {normalize_name(name): name for name in iter_array_names(attrs)}
+    for preferred in preferred_names:
+        key = normalize_name(preferred)
+        if key in name_map:
+            return name_map[key]
+    if contains_tokens:
+        norm_tokens = [normalize_name(tok) for tok in contains_tokens]
+        for norm_name, original in name_map.items():
+            if all(tok in norm_name for tok in norm_tokens):
+                return original
+    return None
+
+
+def get_cell_string_values(pd: vtk.vtkPolyData, array_name: str) -> List[str]:
+    arr = pd.GetCellData().GetAbstractArray(array_name)
+    if arr is None:
+        return []
+    values: List[str] = []
+    for i in range(pd.GetNumberOfCells()):
+        if isinstance(arr, vtk.vtkStringArray):
+            values.append(str(arr.GetValue(i)))
+        else:
+            values.append(str(arr.GetVariantValue(i).ToString()))
+    return values
+
+
+def get_cell_numeric_values(pd: vtk.vtkPolyData, array_name: str, default: float = 0.0) -> List[float]:
+    arr = pd.GetCellData().GetArray(array_name)
+    if arr is None:
+        return [default] * pd.GetNumberOfCells()
+    values: List[float] = []
+    for i in range(pd.GetNumberOfCells()):
+        values.append(float(arr.GetTuple1(i)))
+    return values
+
+
+def get_field_point_id(fd: vtk.vtkFieldData, landmark_key: str) -> Optional[int]:
+    names = [f"Landmark_{landmark_key}_PointId", f"Landmark{landmark_key}PointId"]
+    for name in names:
+        arr = fd.GetArray(name)
+        if arr is not None and arr.GetNumberOfTuples() >= 1:
+            return int(round(float(arr.GetTuple1(0))))
+    return None
+
+
+def get_metadata_landmark_xyz(meta: Dict[str, Any], key: str) -> Optional[np.ndarray]:
+    landmarks = meta.get("landmarks_xyz_canonical", {})
+    if not isinstance(landmarks, dict):
+        return None
+    raw = landmarks.get(key)
+    if not isinstance(raw, (list, tuple)) or len(raw) != 3:
+        return None
+    try:
+        return np.array([float(raw[0]), float(raw[1]), float(raw[2])], dtype=float)
+    except Exception:
+        return None
+
+
+def get_metadata_canonical_frame_summary(meta: Dict[str, Any]) -> Dict[str, Any]:
+    summary = meta.get("canonical_frame_summary", {})
+    return summary if isinstance(summary, dict) else {}
+
+
+def get_metadata_horizontal_frame_source(meta: Dict[str, Any]) -> str:
+    direct = meta.get("horizontal_frame_source")
+    if direct not in (None, ""):
+        return str(direct)
+    summary = get_metadata_canonical_frame_summary(meta)
+    source = summary.get("source", "unknown")
+    return str(source) if source not in (None, "") else "unknown"
+
+
+def get_metadata_horizontal_frame_confidence(meta: Dict[str, Any]) -> float:
+    direct = safe_float(meta.get("horizontal_frame_confidence"), float("nan"))
+    if math.isfinite(direct):
+        return direct
+    summary = get_metadata_canonical_frame_summary(meta)
+    return safe_float(summary.get("confidence"), float("nan"))
+
+
+def get_metadata_ap_orientation_certain(meta: Dict[str, Any]) -> bool:
+    if "ap_orientation_certain" in meta:
+        return bool(meta.get("ap_orientation_certain"))
+    summary = get_metadata_canonical_frame_summary(meta)
+    if "ap_sign_warn" in summary:
+        return not bool(summary.get("ap_sign_warn"))
+    return True
+
+
+def get_metadata_branch_rows(meta: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows_raw = meta.get("centerline_branch_summaries")
+    if not isinstance(rows_raw, list):
+        branch_summary = meta.get("branch_summary", {})
+        if isinstance(branch_summary, dict):
+            rows_raw = branch_summary.get("branches")
+    if not isinstance(rows_raw, list):
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    for fallback_index, raw in enumerate(rows_raw):
+        if not isinstance(raw, dict):
+            continue
+        index_value = raw.get("index", raw.get("polyline_index", fallback_index))
+        try:
+            index = int(index_value)
+        except Exception:
+            index = int(fallback_index)
+        branch_name = raw.get("branch_name", raw.get("name", ""))
+        branch_id = raw.get("branch_id", raw.get("label_id"))
+        topology_role = raw.get("topology_role", "")
+        rows.append(
+            {
+                "index": int(index),
+                "branch_name": str(branch_name) if branch_name is not None else "",
+                "branch_id": (None if branch_id is None else int(branch_id)),
+                "topology_role": str(topology_role) if topology_role is not None else "",
+            }
+        )
+    rows.sort(key=lambda row: int(row["index"]))
+    return rows
+
+
+def get_metadata_branch_rows_by_index(meta: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
+    return {int(row["index"]): row for row in get_metadata_branch_rows(meta)}
+
+
+def get_metadata_branch_cell_order(
+    meta: Dict[str, Any],
+    branch_aliases: Sequence[str],
+    numeric_label_id: Optional[int] = None,
+    topology_roles: Optional[Sequence[str]] = None,
