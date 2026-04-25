@@ -78,6 +78,10 @@ class SegmentRecord:
     terminal_face_name: Optional[str]
     descendant_terminal_names: list[str]
     cell_count: int
+    proximal_boundary: Optional[Dict[str, Any]] = None
+    proximal_boundary_source: Optional[str] = None
+    proximal_boundary_confidence: Optional[float] = None
+    proximal_boundary_arclength: Optional[float] = None
 
 
 @dataclass
@@ -193,6 +197,8 @@ def _segment_records(rows: list[Dict[str, Any]]) -> list[SegmentRecord]:
     records: list[SegmentRecord] = []
     for row in rows:
         segment_id = int(row["segment_id"])
+        proximal_boundary_confidence = row.get("proximal_boundary_confidence")
+        proximal_boundary_arclength = row.get("proximal_boundary_arclength")
         records.append(
             SegmentRecord(
                 segment_id=segment_id,
@@ -210,6 +216,10 @@ def _segment_records(rows: list[Dict[str, Any]]) -> list[SegmentRecord]:
                 terminal_face_name=str(row["terminal_face_name"]) if row.get("terminal_face_name") is not None else None,
                 descendant_terminal_names=[str(v) for v in row.get("descendant_terminal_names", [])],
                 cell_count=int(row.get("cell_count", 0)),
+                proximal_boundary=dict(row["proximal_boundary"]) if isinstance(row.get("proximal_boundary"), dict) else None,
+                proximal_boundary_source=str(row["proximal_boundary_source"]) if row.get("proximal_boundary_source") is not None else None,
+                proximal_boundary_confidence=float(proximal_boundary_confidence) if proximal_boundary_confidence is not None else None,
+                proximal_boundary_arclength=float(proximal_boundary_arclength) if proximal_boundary_arclength is not None else None,
             )
         )
     return sorted(records, key=lambda row: row.segment_id)
@@ -518,6 +528,24 @@ def _serialize_profile(profile: Dict[str, Any], anchor_point: np.ndarray) -> Dic
     }
 
 
+def _serialize_step2_proximal_boundary(boundary: Dict[str, Any], anchor_point: np.ndarray) -> Dict[str, Any]:
+    centroid = np.asarray(boundary.get("centroid", boundary.get("boundary_centroid", anchor_point)), dtype=float)
+    normal = np.asarray(boundary.get("normal", boundary.get("boundary_normal", [0.0, 0.0, 0.0])), dtype=float)
+    return {
+        "boundary_centroid": centroid.tolist(),
+        "boundary_normal": normal.tolist(),
+        "area": boundary.get("area"),
+        "equivalent_diameter": boundary.get("equivalent_diameter"),
+        "major_diameter": boundary.get("major_diameter"),
+        "minor_diameter": boundary.get("minor_diameter"),
+        "rms_planarity": boundary.get("rms_planarity"),
+        "closed_gap": boundary.get("closed_gap"),
+        "point_count": boundary.get("point_count"),
+        "distance_to_anchor": float(distance(centroid, anchor_point)),
+        "step2_boundary": dict(boundary),
+    }
+
+
 def _pick_nearest_profile(profiles: list[Dict[str, Any]], anchor_point: np.ndarray) -> Optional[Dict[str, Any]]:
     if not profiles:
         return None
@@ -561,6 +589,26 @@ def _proximal_metadata(named: NamedSegment, profiles: list[Dict[str, Any]], step
             "boundary_profile": dict(step2.aorta_start),
             "confidence": float(step2.aorta_start.get("confidence", 0.95)),
             "method": "step2_aorta_start_reference",
+        }
+
+    if record.proximal_boundary is not None:
+        confidence = float(
+            record.proximal_boundary_confidence
+            if record.proximal_boundary_confidence is not None
+            else record.proximal_boundary.get("confidence", 0.85)
+        )
+        return {
+            "segment_id": int(record.segment_id),
+            "segment_name": named.segment_name,
+            "source_type": record.proximal_boundary_source or "step2_proximal_boundary",
+            "surface_derived": True,
+            "centerline_derived": True,
+            "centerline_anchor_point": record.proximal_point.tolist(),
+            "boundary_profile": _serialize_step2_proximal_boundary(record.proximal_boundary, record.proximal_point),
+            "boundary_loop_count": int(len(profiles)),
+            "confidence": confidence,
+            "method": "step2_surface_authored_proximal_boundary",
+            "step2_proximal_boundary_arclength": record.proximal_boundary_arclength,
         }
 
     best = _pick_nearest_profile(profiles, record.proximal_point)
@@ -917,6 +965,10 @@ def run_step3(args: argparse.Namespace) -> Dict[str, Any]:
                 "proximal_node_id": int(named.record.proximal_node_id),
                 "distal_node_id": int(named.record.distal_node_id),
                 "proximal_point": named.record.proximal_point.tolist(),
+                "proximal_boundary_source": named.record.proximal_boundary_source,
+                "proximal_boundary_confidence": named.record.proximal_boundary_confidence,
+                "proximal_boundary_arclength": named.record.proximal_boundary_arclength,
+                "proximal_boundary": dict(named.record.proximal_boundary) if named.record.proximal_boundary is not None else None,
                 "distal_point": named.record.distal_point.tolist(),
                 "terminal_face_id": named.record.terminal_face_id,
                 "terminal_face_name": named.record.terminal_face_name,

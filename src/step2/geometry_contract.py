@@ -40,6 +40,9 @@ from src.common.vtk_helpers import (
 )
 
 
+PROXIMAL_BOUNDARY_SELECTION_ALGORITHM = "first_stable_surface_ostium_v2"
+
+
 class Step2Failure(RuntimeError):
     pass
 
@@ -52,6 +55,37 @@ class NetworkEdge:
     end_node: int
     points: np.ndarray
     length: float
+
+
+@dataclass
+class SegmentBoundaryProfile:
+    source_type: str
+    centroid: np.ndarray
+    normal: np.ndarray
+    area: float
+    equivalent_diameter: Optional[float]
+    major_diameter: Optional[float]
+    minor_diameter: Optional[float]
+    arclength: float
+    confidence: float
+    method: str
+    attempts: list[Dict[str, Any]] = field(default_factory=list)
+
+    def to_contract(self) -> Dict[str, Any]:
+        return {
+            "source_type": self.source_type,
+            "centroid": self.centroid.tolist(),
+            "normal": unit(self.normal).tolist(),
+            "area": float(self.area),
+            "equivalent_diameter": self.equivalent_diameter,
+            "major_diameter": self.major_diameter,
+            "minor_diameter": self.minor_diameter,
+            "arclength": float(self.arclength),
+            "confidence": float(self.confidence),
+            "method": self.method,
+            "selection_algorithm": PROXIMAL_BOUNDARY_SELECTION_ALGORITHM,
+            "attempts": self.attempts,
+        }
 
 
 @dataclass
@@ -70,10 +104,21 @@ class GeometrySegment:
     descendant_terminal_names: list[str] = field(default_factory=list)
     cell_count: int = 0
     fallback_cell_count: int = 0
+    proximal_boundary: Optional[SegmentBoundaryProfile] = None
+    proximal_boundary_attempts: list[Dict[str, Any]] = field(default_factory=list)
+    proximal_boundary_warning: Optional[str] = None
 
     @property
     def length(self) -> float:
         return float(cumulative_arclength(self.points)[-1]) if self.points.shape[0] else 0.0
+
+    @property
+    def effective_proximal_point(self) -> np.ndarray:
+        if self.proximal_boundary is not None:
+            return np.asarray(self.proximal_boundary.centroid, dtype=float)
+        if self.points.shape[0]:
+            return np.asarray(self.points[0], dtype=float)
+        return np.zeros(3, dtype=float)
 
 
 def _abs(path: str | Path) -> str:
@@ -635,17 +680,761 @@ def _extract_aorta_end_profile(
     raise Step2Failure(f"Aortic end cannot be measured: no valid pre-bifurcation surface section found. Attempts: {attempts}")
 
 
+def _project_point_to_polyline(point: np.ndarray, points: np.ndarray) -> tuple[float, float, np.ndarray]:
+    pts = np.asarray(points, dtype=float)
+    p = as_point(point)
+    if pts.shape[0] == 0:
+        return float("inf"), 0.0, np.zeros(3, dtype=float)
+    if pts.shape[0] == 1:
+        return distance(p, pts[0]), 0.0, pts[0].copy()
+
+    best_distance = float("inf")
+    best_s = 0.0
+    best_point = pts[0].copy()
+    running_s = 0.0
+    for idx in range(pts.shape[0] - 1):
+        a = pts[idx]
+        b = pts[idx + 1]
+        ab = b - a
+        seg_len2 = float(np.dot(ab, ab))
+        if seg_len2 <= 1.0e-12:
+            continue
+        t = float(np.clip(np.dot(p - a, ab) / seg_len2, 0.0, 1.0))
+        q = a + t * ab
+        d = distance(p, q)
+        seg_len = math.sqrt(seg_len2)
+        if d < best_distance:
+            best_distance = float(d)
+            best_s = float(running_s + t * seg_len)
+            best_point = q
+        running_s += seg_len
+    return best_distance, best_s, best_point
+
+
+def _trim_polyline_from_arclength(points: np.ndarray, start_s: float) -> np.ndarray:
+    pts = np.asarray(points, dtype=float)
+    if pts.shape[0] < 2:
+        return pts.copy()
+    s = cumulative_arclength(pts)
+    start = float(np.clip(start_s, 0.0, float(s[-1])))
+    start_point = point_at_arclength(pts, start)
+    keep_idx = int(np.searchsorted(s, start, side="right"))
+    tail = pts[keep_idx:] if keep_idx < pts.shape[0] else np.zeros((0, 3), dtype=float)
+    if tail.shape[0] and distance(start_point, tail[0]) <= 1.0e-8:
+        return tail.copy()
+    return np.vstack([start_point.reshape(1, 3), tail])
+
+
+def _project_points_to_polyline(points: np.ndarray, polyline: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    query = np.asarray(points, dtype=float)
+    pts = np.asarray(polyline, dtype=float)
+    if query.shape[0] == 0:
+        return np.zeros((0,), dtype=float), np.zeros((0,), dtype=float)
+    if pts.shape[0] < 2:
+        d = np.linalg.norm(query - pts[0].reshape(1, 3), axis=1) if pts.shape[0] else np.full((query.shape[0],), np.inf)
+        return d.astype(float), np.zeros((query.shape[0],), dtype=float)
+
+    cumulative = cumulative_arclength(pts)
+    best_d2 = np.full((query.shape[0],), np.inf, dtype=float)
+    best_s = np.zeros((query.shape[0],), dtype=float)
+    for idx in range(pts.shape[0] - 1):
+        a = pts[idx]
+        b = pts[idx + 1]
+        ab = b - a
+        seg_len2 = float(np.dot(ab, ab))
+        if seg_len2 <= 1.0e-12:
+            continue
+        t = np.clip(np.sum((query - a.reshape(1, 3)) * ab.reshape(1, 3), axis=1) / seg_len2, 0.0, 1.0)
+        proj = a.reshape(1, 3) + t.reshape(-1, 1) * ab.reshape(1, 3)
+        d2 = np.sum((query - proj) ** 2, axis=1)
+        improved = d2 < best_d2
+        if np.any(improved):
+            best_d2[improved] = d2[improved]
+            best_s[improved] = cumulative[idx] + t[improved] * math.sqrt(seg_len2)
+    return np.sqrt(np.maximum(best_d2, 0.0)).astype(float), best_s.astype(float)
+
+
+def _extract_branch_proximal_boundary(
+    surface: vtk.vtkPolyData,
+    segment: GeometrySegment,
+    expected_area: Optional[float] = None,
+    expected_diameter: Optional[float] = None,
+) -> Optional[SegmentBoundaryProfile]:
+    length = float(segment.length)
+    if segment.segment_type == "aorta_trunk" or length <= 1.0e-6:
+        return None
+
+    offsets = [0.1 * idx for idx in range(1, 51)]
+    valid_offsets = [offset for offset in offsets if offset < max(0.0, length - 0.1)]
+    if not valid_offsets:
+        valid_offsets = [min(0.25, 0.5 * length)]
+
+    attempts: list[Dict[str, Any]] = []
+    accepted_candidates: list[Dict[str, Any]] = []
+
+    def reference_diameter_for(eq_diameter: Optional[float]) -> float:
+        if expected_diameter is not None and expected_diameter > 0.0:
+            return float(expected_diameter)
+        if eq_diameter is not None and float(eq_diameter) > 0.0:
+            return float(eq_diameter)
+        return 1.0
+
+    def add_rejection(reasons: Dict[str, int], reason: str) -> None:
+        reasons[reason] = int(reasons.get(reason, 0)) + 1
+
+    for offset_index, offset in enumerate(valid_offsets):
+        origin = point_at_arclength(segment.points, float(offset))
+        tangent = tangent_at_arclength(segment.points, float(offset), window=0.75)
+        profiles = _contour_profiles_from_plane(surface, origin, tangent)
+        attempt: Dict[str, Any] = {
+            "offset_mm": float(offset),
+            "candidate_count": int(len(profiles)),
+            "accepted_candidate_count": 0,
+            "rejection_reasons": {},
+            "normalized_origin_distance": None,
+            "normalized_centroid_distance": None,
+            "stability_run_id": None,
+            "selected_reason": None,
+        }
+        if not profiles:
+            attempts.append(attempt)
+            continue
+
+        rejection_reasons: Dict[str, int] = {}
+        ranked: list[tuple[float, Dict[str, Any], Dict[str, float]]] = []
+        for profile in profiles:
+            centroid = np.asarray(profile["centroid"], dtype=float)
+            centroid_distance, _, _ = _project_point_to_polyline(centroid, segment.points)
+            origin_distance = distance(centroid, origin)
+            closed_gap = float(profile["closed_gap"])
+            area = float(profile["area"])
+            eq_diameter = profile.get("equivalent_diameter")
+            reference_diameter = reference_diameter_for(eq_diameter)
+            origin_tolerance = max(0.50, 0.90 * reference_diameter)
+            centroid_tolerance = max(0.40, 0.75 * reference_diameter)
+            normalized_origin_distance = origin_distance / max(reference_diameter, 1.0e-6)
+            normalized_centroid_distance = centroid_distance / max(reference_diameter, 1.0e-6)
+
+            candidate_rejections: list[str] = []
+            if origin_distance > origin_tolerance:
+                candidate_rejections.append("origin_distance_gt_normalized_tolerance")
+            if centroid_distance > centroid_tolerance:
+                candidate_rejections.append("centroid_distance_gt_normalized_tolerance")
+            if closed_gap > 1.0:
+                candidate_rejections.append("closed_gap_gt_1mm")
+            if area <= 1.0e-8:
+                candidate_rejections.append("nonpositive_area")
+            if expected_area is not None and expected_area > 0.0 and area > max(5.0 * float(expected_area), float(expected_area) + 10.0):
+                candidate_rejections.append("area_gt_expected_branch_limit")
+            if (
+                expected_diameter is not None
+                and expected_diameter > 0.0
+                and eq_diameter is not None
+                and float(eq_diameter) > max(2.75 * float(expected_diameter), float(expected_diameter) + 3.5)
+            ):
+                candidate_rejections.append("diameter_gt_expected_branch_limit")
+
+            if candidate_rejections:
+                for reason in candidate_rejections:
+                    add_rejection(rejection_reasons, reason)
+                continue
+
+            origin_fraction = origin_distance / max(origin_tolerance, 1.0e-6)
+            centroid_fraction = centroid_distance / max(centroid_tolerance, 1.0e-6)
+            closure_fraction = closed_gap / max(0.25 * reference_diameter, 1.0e-6)
+            score = float(origin_fraction + 0.5 * centroid_fraction + 0.25 * closure_fraction)
+            ranked.append(
+                (
+                    score,
+                    profile,
+                    {
+                        "origin_distance": float(origin_distance),
+                        "centroid_distance": float(centroid_distance),
+                        "normalized_origin_distance": float(normalized_origin_distance),
+                        "normalized_centroid_distance": float(normalized_centroid_distance),
+                        "origin_fraction": float(origin_fraction),
+                        "centroid_fraction": float(centroid_fraction),
+                        "reference_diameter": float(reference_diameter),
+                    },
+                )
+            )
+
+        attempt["rejection_reasons"] = rejection_reasons
+        attempt["accepted_candidate_count"] = int(len(ranked))
+        if not ranked:
+            attempts.append(attempt)
+            continue
+
+        score, selected, metrics = min(ranked, key=lambda item: item[0])
+        attempt["selected_candidate_score"] = float(score)
+        attempt["selected_candidate_area"] = float(selected["area"])
+        attempt["selected_candidate_equivalent_diameter"] = selected["equivalent_diameter"]
+        attempt["normalized_origin_distance"] = float(metrics["normalized_origin_distance"])
+        attempt["normalized_centroid_distance"] = float(metrics["normalized_centroid_distance"])
+        attempt["origin_distance"] = float(metrics["origin_distance"])
+        attempt["centroid_distance"] = float(metrics["centroid_distance"])
+        attempt["reference_diameter"] = float(metrics["reference_diameter"])
+        confidence = 0.85
+        if float(selected["closed_gap"]) > 0.25:
+            confidence = 0.7
+        if float(metrics["origin_fraction"]) > 0.85 or float(metrics["centroid_fraction"]) > 0.85:
+            confidence = min(confidence, 0.78)
+
+        boundary = SegmentBoundaryProfile(
+            source_type="surface_ostium_plane_cut",
+            centroid=np.asarray(selected["centroid"], dtype=float),
+            normal=unit(tangent),
+            area=float(selected["area"]),
+            equivalent_diameter=selected["equivalent_diameter"],
+            major_diameter=selected["major_diameter"],
+            minor_diameter=selected["minor_diameter"],
+            arclength=float(offset),
+            confidence=float(confidence),
+            method=PROXIMAL_BOUNDARY_SELECTION_ALGORITHM,
+            attempts=[],
+        )
+        accepted_candidates.append(
+            {
+                "offset_index": int(offset_index),
+                "attempt_index": int(len(attempts)),
+                "offset": float(offset),
+                "boundary": boundary,
+                "score": float(score),
+                "area": float(selected["area"]),
+                "equivalent_diameter": float(selected["equivalent_diameter"])
+                if selected["equivalent_diameter"] is not None
+                else float(metrics["reference_diameter"]),
+                "centroid": np.asarray(selected["centroid"], dtype=float),
+                "normal": unit(tangent),
+                "confidence": float(confidence),
+            }
+        )
+        attempts.append(attempt)
+
+    selected_candidate: Optional[Dict[str, Any]] = None
+    selected_reason = ""
+    stable_run_id = 0
+    for idx in range(0, max(0, len(accepted_candidates) - 2)):
+        run = accepted_candidates[idx : idx + 3]
+        if any(int(run[j + 1]["offset_index"]) != int(run[j]["offset_index"]) + 1 for j in range(2)):
+            continue
+        if float(run[-1]["offset"]) - float(run[0]["offset"]) > 0.31:
+            continue
+        diameters = np.asarray([max(float(item["equivalent_diameter"]), 1.0e-6) for item in run], dtype=float)
+        areas = np.asarray([max(float(item["area"]), 1.0e-8) for item in run], dtype=float)
+        median_diameter = float(np.median(diameters))
+        diameter_ratio = float(np.max(diameters) / max(float(np.min(diameters)), 1.0e-6))
+        area_ratio = float(np.max(areas) / max(float(np.min(areas)), 1.0e-8))
+        centroid_steps = [distance(np.asarray(run[j]["centroid"], dtype=float), np.asarray(run[j + 1]["centroid"], dtype=float)) for j in range(2)]
+        max_centroid_step = max(centroid_steps) if centroid_steps else 0.0
+        normal_dots = [
+            abs(float(np.dot(unit(np.asarray(run[j]["normal"], dtype=float)), unit(np.asarray(run[j + 1]["normal"], dtype=float)))))
+            for j in range(2)
+        ]
+        if diameter_ratio > 1.75 or area_ratio > 2.25:
+            continue
+        if max_centroid_step > max(0.40, 0.45 * median_diameter):
+            continue
+        if min(normal_dots) < 0.50:
+            continue
+        stable_run_id += 1
+        for item in run:
+            attempts[int(item["attempt_index"])]["stability_run_id"] = int(stable_run_id)
+        attempts[int(run[0]["attempt_index"])]["selected_reason"] = "earliest_candidate_in_first_stable_run"
+        attempts[int(run[0]["attempt_index"])]["stable_run_diameter_ratio"] = diameter_ratio
+        attempts[int(run[0]["attempt_index"])]["stable_run_area_ratio"] = area_ratio
+        attempts[int(run[0]["attempt_index"])]["stable_run_max_centroid_step"] = float(max_centroid_step)
+        selected_candidate = run[0]
+        selected_reason = "earliest_candidate_in_first_stable_run"
+        break
+
+    if selected_candidate is None and accepted_candidates:
+        strong_candidates = [item for item in accepted_candidates if float(item["confidence"]) >= 0.75]
+        selected_candidate = strong_candidates[0] if strong_candidates else accepted_candidates[0]
+        selected_reason = "earliest_strong_candidate_no_stable_run" if strong_candidates else "earliest_candidate_no_stable_run"
+        attempts[int(selected_candidate["attempt_index"])]["selected_reason"] = selected_reason
+        boundary = selected_candidate["boundary"]
+        boundary.confidence = float(min(float(boundary.confidence), 0.68))
+    elif selected_candidate is not None:
+        boundary = selected_candidate["boundary"]
+    else:
+        segment.proximal_boundary_attempts = attempts
+        return None
+
+    attempts[int(selected_candidate["attempt_index"])]["selected_reason"] = selected_reason
+    boundary.attempts = attempts
+    return boundary
+
+
+def _refine_branch_boundaries(
+    surface: vtk.vtkPolyData,
+    segments: list[GeometrySegment],
+    face_node_map: Dict[int, Dict[str, Any]],
+) -> list[str]:
+    warnings: list[str] = []
+    for segment in segments:
+        if segment.segment_type == "aorta_trunk":
+            continue
+        terminal = dict(face_node_map.get(int(segment.terminal_face_id), {}).get("termination", {})) if segment.terminal_face_id is not None else {}
+        boundary = _extract_branch_proximal_boundary(
+            surface,
+            segment,
+            expected_area=float(terminal["area"]) if terminal.get("area") is not None else None,
+            expected_diameter=float(terminal["diameter_eq"]) if terminal.get("diameter_eq") is not None else None,
+        )
+        if boundary is None:
+            warning = (
+                f"W_STEP2_PROXIMAL_BOUNDARY_UNRESOLVED: segment {segment.segment_id} "
+                f"({segment.name_hint}) kept graph-node proximal start."
+            )
+            segment.proximal_boundary_warning = warning
+            warnings.append(warning)
+            continue
+        if float(boundary.confidence) < 0.75:
+            warning = (
+                f"W_STEP2_PROXIMAL_BOUNDARY_LOW_CONFIDENCE: segment {segment.segment_id} "
+                f"({segment.name_hint}) used fallback boundary selection."
+            )
+            segment.proximal_boundary_warning = warning
+            warnings.append(warning)
+        segment.proximal_boundary = boundary
+        segment.proximal_boundary_attempts = boundary.attempts
+    return warnings
+
+
+def _surface_cell_adjacency(surface: vtk.vtkPolyData) -> list[set[int]]:
+    edge_to_cells: dict[tuple[int, int], list[int]] = {}
+    for cell_id in range(surface.GetNumberOfCells()):
+        cell = surface.GetCell(int(cell_id))
+        ids = cell.GetPointIds()
+        n_ids = ids.GetNumberOfIds()
+        for idx in range(n_ids):
+            a = int(ids.GetId(idx))
+            b = int(ids.GetId((idx + 1) % n_ids))
+            edge = (a, b) if a < b else (b, a)
+            edge_to_cells.setdefault(edge, []).append(int(cell_id))
+
+    adjacency = [set() for _ in range(surface.GetNumberOfCells())]
+    for cells in edge_to_cells.values():
+        if len(cells) < 2:
+            continue
+        for cell_id in cells:
+            adjacency[cell_id].update(other for other in cells if other != cell_id)
+    return adjacency
+
+
+def _cleanup_small_label_islands(
+    surface: vtk.vtkPolyData,
+    labels: np.ndarray,
+    protected_face_ids: set[int],
+    assignment_mode: np.ndarray,
+    *,
+    max_island_cells: int = 20,
+) -> Dict[str, int]:
+    model_face = get_cell_array(surface, "ModelFaceID")
+    protected = np.zeros((surface.GetNumberOfCells(),), dtype=bool)
+    if model_face is not None and protected_face_ids:
+        protected = np.isin(model_face.astype(int), list(protected_face_ids))
+
+    adjacency = _surface_cell_adjacency(surface)
+    visited = np.zeros((surface.GetNumberOfCells(),), dtype=bool)
+    relabeled_components = 0
+    relabeled_cells = 0
+
+    for start_cell in range(surface.GetNumberOfCells()):
+        if visited[start_cell]:
+            continue
+        label = int(labels[start_cell])
+        stack = [int(start_cell)]
+        component: list[int] = []
+        visited[start_cell] = True
+        neighbor_labels: dict[int, int] = {}
+        touches_protected = False
+
+        while stack:
+            cell_id = stack.pop()
+            component.append(cell_id)
+            touches_protected = touches_protected or bool(protected[cell_id])
+            for nbr in adjacency[cell_id]:
+                nbr_label = int(labels[nbr])
+                if nbr_label == label and not visited[nbr]:
+                    visited[nbr] = True
+                    stack.append(int(nbr))
+                elif nbr_label != label and nbr_label > 0:
+                    neighbor_labels[nbr_label] = neighbor_labels.get(nbr_label, 0) + 1
+
+        if touches_protected or len(component) > max_island_cells or not neighbor_labels:
+            continue
+        new_label = max(neighbor_labels.items(), key=lambda item: item[1])[0]
+        if int(new_label) == label:
+            continue
+        for cell_id in component:
+            labels[cell_id] = int(new_label)
+            assignment_mode[cell_id] = 6
+        relabeled_components += 1
+        relabeled_cells += len(component)
+
+    return {
+        "cleanup_relabel_components": int(relabeled_components),
+        "cleanup_relabel_cells": int(relabeled_cells),
+        "cleanup_max_island_cells": int(max_island_cells),
+    }
+
+
+def _segment_assignment_radius(segment: GeometrySegment) -> float:
+    if segment.segment_type == "aorta_trunk":
+        return 3.0
+    if segment.proximal_boundary is not None and segment.proximal_boundary.equivalent_diameter is not None:
+        return max(0.5 * float(segment.proximal_boundary.equivalent_diameter), 0.45)
+    return 1.0
+
+
+def _assignment_polyline(segment: GeometrySegment) -> np.ndarray:
+    points = np.asarray(segment.points, dtype=float)
+    if segment.segment_type != "aorta_trunk" and segment.proximal_boundary is not None:
+        return _trim_polyline_from_arclength(points, float(segment.proximal_boundary.arclength))
+    return points
+
+
+def _build_ostium_barriers(
+    centers: np.ndarray,
+    adjacency: list[set[int]],
+    segments: list[GeometrySegment],
+) -> tuple[set[tuple[int, int]], np.ndarray, Dict[str, int]]:
+    n_cells = int(centers.shape[0])
+    blocked_edges: set[tuple[int, int]] = set()
+    barrier_segment_id = np.zeros((n_cells,), dtype=np.int32)
+    barrier_cells: set[int] = set()
+    interfaces_used = 0
+    segment_by_id = {int(seg.segment_id): seg for seg in segments}
+
+    for child in segments:
+        if child.segment_type == "aorta_trunk" or child.proximal_boundary is None or child.parent_segment_id is None:
+            continue
+        parent = segment_by_id.get(int(child.parent_segment_id))
+        if parent is None:
+            continue
+        radius = _segment_assignment_radius(child)
+        parent_radius = _segment_assignment_radius(parent)
+        boundary = child.proximal_boundary
+        normal = unit(np.asarray(boundary.normal, dtype=float))
+        if float(np.linalg.norm(normal)) <= 1.0e-12:
+            continue
+        patch_radius = max(1.5, 1.8 * radius)
+        patch_ids = np.flatnonzero(np.linalg.norm(centers - boundary.centroid.reshape(1, 3), axis=1) <= patch_radius)
+        if patch_ids.size == 0:
+            continue
+        interfaces_used += 1
+        patch_set = {int(v) for v in patch_ids.tolist()}
+        signed = (centers[patch_ids] - boundary.centroid.reshape(1, 3)) @ normal
+        signed_by_cell = {int(cell_id): float(value) for cell_id, value in zip(patch_ids.tolist(), signed.tolist())}
+        patch_centers = centers[patch_ids]
+        child_distance, _ = _project_points_to_polyline(patch_centers, _assignment_polyline(child))
+        parent_distance, _ = _project_points_to_polyline(patch_centers, _assignment_polyline(parent))
+        child_score = child_distance / max(radius, 0.45)
+        parent_score = parent_distance / max(parent_radius, 0.45)
+        child_like_values = (signed >= -0.08 * radius) & (child_distance <= max(1.55 * radius, radius + 0.40)) & (child_score + 0.20 < parent_score)
+        child_like_by_cell = {int(cell_id): bool(value) for cell_id, value in zip(patch_ids.tolist(), child_like_values.tolist())}
+
+        band = max(0.18 * radius, 0.12)
+        for cell_id in patch_set:
+            if abs(signed_by_cell[cell_id]) <= max(0.45 * radius, 0.25):
+                barrier_cells.add(cell_id)
+                barrier_segment_id[cell_id] = int(child.segment_id)
+            for nbr in adjacency[cell_id]:
+                nbr = int(nbr)
+                if nbr not in patch_set or cell_id > nbr:
+                    continue
+                a = signed_by_cell[cell_id]
+                b = signed_by_cell[nbr]
+                crosses_plane = (a <= -band and b >= band) or (b <= -band and a >= band)
+                changes_parent_child_side = child_like_by_cell[cell_id] != child_like_by_cell[nbr]
+                if crosses_plane or changes_parent_child_side:
+                    blocked_edges.add((cell_id, nbr) if cell_id < nbr else (nbr, cell_id))
+
+    return blocked_edges, barrier_segment_id, {
+        "barrier_interfaces_used": int(interfaces_used),
+        "barrier_cell_count": int(len(barrier_cells)),
+        "blocked_edge_count": int(len(blocked_edges)),
+    }
+
+
+def _precompute_segment_projections(
+    centers: np.ndarray,
+    segments: list[GeometrySegment],
+) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray], dict[int, float], np.ndarray]:
+    distance_by_segment: dict[int, np.ndarray] = {}
+    arclength_by_segment: dict[int, np.ndarray] = {}
+    radius_by_segment: dict[int, float] = {}
+    nearest_segment = np.zeros((centers.shape[0],), dtype=np.int32)
+    nearest_score = np.full((centers.shape[0],), np.inf, dtype=float)
+
+    for segment in segments:
+        seg_id = int(segment.segment_id)
+        radius = _segment_assignment_radius(segment)
+        distance, arclength = _project_points_to_polyline(centers, _assignment_polyline(segment))
+        distance_by_segment[seg_id] = distance
+        arclength_by_segment[seg_id] = arclength
+        radius_by_segment[seg_id] = radius
+        score = distance / max(radius, 0.45)
+        better = score < nearest_score
+        nearest_score[better] = score[better]
+        nearest_segment[better] = seg_id
+    return distance_by_segment, arclength_by_segment, radius_by_segment, nearest_segment
+
+
+def _assign_seed(
+    labels: np.ndarray,
+    assignment_mode: np.ndarray,
+    seed_segment_id: np.ndarray,
+    fixed: np.ndarray,
+    seed_score: np.ndarray,
+    cell_ids: np.ndarray,
+    segment_id: int,
+    mode: int,
+    score_values: Optional[np.ndarray] = None,
+    *,
+    force: bool = False,
+) -> int:
+    if cell_ids.size == 0:
+        return 0
+    if score_values is None:
+        score_values = np.zeros((cell_ids.size,), dtype=float)
+    assigned = 0
+    for cell_id_raw, score_raw in zip(cell_ids.tolist(), score_values.tolist()):
+        cell_id = int(cell_id_raw)
+        score = float(score_raw)
+        if fixed[cell_id] and not force:
+            continue
+        if force or labels[cell_id] <= 0 or score < float(seed_score[cell_id]):
+            labels[cell_id] = int(segment_id)
+            assignment_mode[cell_id] = int(mode)
+            seed_segment_id[cell_id] = int(segment_id)
+            seed_score[cell_id] = float(score)
+            assigned += 1
+    return assigned
+
+
+def _build_segment_seeds(
+    labels: np.ndarray,
+    assignment_mode: np.ndarray,
+    seed_segment_id: np.ndarray,
+    fixed: np.ndarray,
+    centers: np.ndarray,
+    model_face: Optional[np.ndarray],
+    segments: list[GeometrySegment],
+    inlet_face_id: int,
+    segment_by_terminal_face: dict[int, int],
+    distance_by_segment: dict[int, np.ndarray],
+    arclength_by_segment: dict[int, np.ndarray],
+    radius_by_segment: dict[int, float],
+    barrier_segment_id: np.ndarray,
+) -> Dict[str, int]:
+    seed_score = np.full((labels.shape[0],), np.inf, dtype=float)
+    counts: Dict[str, int] = {
+        "inlet_face_seed_cells": 0,
+        "terminal_face_seed_cells": 0,
+        "core_seed_cells": 0,
+        "weak_core_seed_cells": 0,
+    }
+    seed_counts_by_segment: dict[int, int] = {int(seg.segment_id): 0 for seg in segments}
+
+    if model_face is not None:
+        inlet_ids = np.flatnonzero(model_face.astype(int) == int(inlet_face_id))
+        counts["inlet_face_seed_cells"] = _assign_seed(
+            labels,
+            assignment_mode,
+            seed_segment_id,
+            fixed,
+            seed_score,
+            inlet_ids,
+            1,
+            1,
+            force=True,
+        )
+        fixed[inlet_ids] = True
+        seed_counts_by_segment[1] += int(inlet_ids.size)
+
+        for face_id, segment_id in segment_by_terminal_face.items():
+            face_ids = np.flatnonzero(model_face.astype(int) == int(face_id))
+            assigned = _assign_seed(
+                labels,
+                assignment_mode,
+                seed_segment_id,
+                fixed,
+                seed_score,
+                face_ids,
+                int(segment_id),
+                2,
+                force=True,
+            )
+            fixed[face_ids] = True
+            counts["terminal_face_seed_cells"] += int(assigned)
+            seed_counts_by_segment[int(segment_id)] = seed_counts_by_segment.get(int(segment_id), 0) + int(face_ids.size)
+
+    for segment in segments:
+        seg_id = int(segment.segment_id)
+        radius = radius_by_segment[seg_id]
+        distance = distance_by_segment[seg_id]
+        arclength = arclength_by_segment[seg_id]
+        available = ~fixed
+        if segment.segment_type == "aorta_trunk":
+            seed_radius = 1.35
+            candidates = np.flatnonzero(available & (distance <= seed_radius) & (barrier_segment_id == 0))
+            scores = distance[candidates] / max(seed_radius, 0.45) if candidates.size else np.zeros((0,), dtype=float)
+        else:
+            core_offset = max(1.25 * radius, 0.80)
+            seed_radius = max(0.85 * radius, 0.40)
+            candidates = np.flatnonzero(available & (distance <= seed_radius) & (arclength >= core_offset))
+            if segment.proximal_boundary is not None and candidates.size:
+                normal = unit(np.asarray(segment.proximal_boundary.normal, dtype=float))
+                signed = (centers[candidates] - segment.proximal_boundary.centroid.reshape(1, 3)) @ normal
+                candidates = candidates[signed >= -0.08 * radius]
+            if segment.parent_segment_id is not None and candidates.size:
+                parent_id = int(segment.parent_segment_id)
+                parent_distance = distance_by_segment.get(parent_id)
+                parent_radius = radius_by_segment.get(parent_id, 1.0)
+                if parent_distance is not None:
+                    child_score = distance[candidates] / max(radius, 0.45)
+                    parent_score = parent_distance[candidates] / max(parent_radius, 0.45)
+                    candidates = candidates[child_score + 0.20 < parent_score]
+            scores = distance[candidates] / max(radius, 0.45) if candidates.size else np.zeros((0,), dtype=float)
+
+        assigned = _assign_seed(
+            labels,
+            assignment_mode,
+            seed_segment_id,
+            fixed,
+            seed_score,
+            candidates,
+            seg_id,
+            3,
+            scores,
+        )
+        counts["core_seed_cells"] += int(assigned)
+        seed_counts_by_segment[seg_id] = seed_counts_by_segment.get(seg_id, 0) + int(assigned)
+
+        if seed_counts_by_segment.get(seg_id, 0) <= 0:
+            weak_candidates = np.flatnonzero((~fixed) & np.isfinite(distance))
+            if segment.segment_type != "aorta_trunk":
+                weak_candidates = weak_candidates[arclength[weak_candidates] >= max(0.25 * radius, 0.2)]
+            if weak_candidates.size:
+                order = np.argsort(distance[weak_candidates])[: min(12, int(weak_candidates.size))]
+                selected = weak_candidates[order]
+                weak_scores = 1.0 + distance[selected] / max(radius, 0.45)
+                weak_assigned = _assign_seed(
+                    labels,
+                    assignment_mode,
+                    seed_segment_id,
+                    fixed,
+                    seed_score,
+                    selected,
+                    seg_id,
+                    9,
+                    weak_scores,
+                )
+                counts["weak_core_seed_cells"] += int(weak_assigned)
+                seed_counts_by_segment[seg_id] = seed_counts_by_segment.get(seg_id, 0) + int(weak_assigned)
+
+    for seg_id, count in sorted(seed_counts_by_segment.items()):
+        counts[f"seed_segment_{int(seg_id)}"] = int(count)
+    counts["seed_count_total"] = int(sum(seed_counts_by_segment.values()))
+    return counts
+
+
+def _propagate_surface_labels(
+    centers: np.ndarray,
+    adjacency: list[set[int]],
+    labels: np.ndarray,
+    assignment_mode: np.ndarray,
+    fixed: np.ndarray,
+    segments: list[GeometrySegment],
+    distance_by_segment: dict[int, np.ndarray],
+    radius_by_segment: dict[int, float],
+    blocked_edges: set[tuple[int, int]],
+) -> np.ndarray:
+    segment_by_id = {int(seg.segment_id): seg for seg in segments}
+    best_cost = np.full((labels.shape[0],), np.inf, dtype=float)
+    queue: list[tuple[float, int, int]] = []
+    for cell_id in np.flatnonzero(labels > 0).tolist():
+        seg_id = int(labels[int(cell_id)])
+        best_cost[int(cell_id)] = 0.0
+        heapq.heappush(queue, (0.0, int(cell_id), seg_id))
+
+    while queue:
+        cost, cell_id, seg_id = heapq.heappop(queue)
+        if cost > float(best_cost[cell_id]) + 1.0e-12 or int(labels[cell_id]) != int(seg_id):
+            continue
+        segment = segment_by_id.get(int(seg_id))
+        if segment is None:
+            continue
+        radius = max(radius_by_segment.get(int(seg_id), 1.0), 0.45)
+        for nbr_raw in adjacency[cell_id]:
+            nbr = int(nbr_raw)
+            edge = (cell_id, nbr) if cell_id < nbr else (nbr, cell_id)
+            if edge in blocked_edges:
+                continue
+            if fixed[nbr] and int(labels[nbr]) != int(seg_id):
+                continue
+            dist_to_segment = float(distance_by_segment[int(seg_id)][nbr])
+            if segment.segment_type != "aorta_trunk":
+                max_branch_distance = max(2.0 * radius + 0.35, 1.35)
+                if dist_to_segment > max_branch_distance:
+                    continue
+                if segment.proximal_boundary is not None:
+                    signed = float(
+                        np.dot(
+                            centers[nbr] - segment.proximal_boundary.centroid,
+                            unit(np.asarray(segment.proximal_boundary.normal, dtype=float)),
+                        )
+                    )
+                    if signed < -0.08 * radius:
+                        continue
+            edge_len = distance(centers[cell_id], centers[nbr])
+            dist_norm = dist_to_segment / radius
+            new_cost = float(cost + edge_len / radius + 0.18 * dist_norm)
+            if new_cost + 1.0e-9 < float(best_cost[nbr]):
+                best_cost[nbr] = new_cost
+                labels[nbr] = int(seg_id)
+                if assignment_mode[nbr] <= 0 or assignment_mode[nbr] == 5:
+                    assignment_mode[nbr] = 4
+                heapq.heappush(queue, (new_cost, nbr, int(seg_id)))
+    return best_cost
+
+
+def _recover_unassigned_cells(
+    labels: np.ndarray,
+    assignment_mode: np.ndarray,
+    nearest_segment: np.ndarray,
+) -> int:
+    missing = np.flatnonzero(labels <= 0)
+    if missing.size == 0:
+        return 0
+    labels[missing] = np.maximum(nearest_segment[missing], 1)
+    assignment_mode[missing] = 5
+    return int(missing.size)
+
+
 def _assign_surface_cells(
     surface: vtk.vtkPolyData,
     segments: list[GeometrySegment],
     inlet_face_id: int,
-) -> tuple[np.ndarray, Dict[str, int], Dict[int, int]]:
+    *,
+    cleanup: bool = True,
+) -> tuple[np.ndarray, Dict[str, int], Dict[int, int], Dict[str, np.ndarray]]:
     n_cells = int(surface.GetNumberOfCells())
-    labels = np.zeros((n_cells,), dtype=np.int32)
+    labels = np.full((n_cells,), -1, dtype=np.int32)
+    assignment_mode = np.zeros((n_cells,), dtype=np.int32)
+    seed_segment_id = np.zeros((n_cells,), dtype=np.int32)
+    barrier_segment_id = np.zeros((n_cells,), dtype=np.int32)
+    rejected_segment = np.zeros((n_cells,), dtype=np.int32)
+    propagation_cost = np.full((n_cells,), np.inf, dtype=float)
     assignment_counts: Dict[str, int] = {
-        "face_terminal_override": 0,
-        "inlet_face_override": 0,
-        "nearest_centerline": 0,
+        "assignment_algorithm_surface_seeded_propagation_v1": 1,
+        "fixed_seed_cells": 0,
+        "core_seed_cells": 0,
+        "weak_core_seed_cells": 0,
+        "propagated_cells": 0,
         "fallback": 0,
     }
 
@@ -654,36 +1443,76 @@ def _assign_surface_cells(
         for seg in segments
         if seg.terminal_face_id is not None
     }
-    segment_points = [(int(seg.segment_id), np.asarray(seg.points, dtype=float)) for seg in segments]
-    locator, locator_pd = build_segment_point_locator(segment_points)
-    locator_segment_array = locator_pd.GetPointData().GetArray("SegmentId")
     centers = cell_centers(surface)
     model_face = get_cell_array(surface, "ModelFaceID")
+    protected_face_ids = {int(inlet_face_id), *segment_by_terminal_face.keys()}
+    adjacency = _surface_cell_adjacency(surface)
+    distance_by_segment, arclength_by_segment, radius_by_segment, nearest_segment = _precompute_segment_projections(centers, segments)
+    blocked_edges, barrier_segment_id, barrier_counts = _build_ostium_barriers(centers, adjacency, segments)
+    assignment_counts.update(barrier_counts)
 
-    for cell_id in range(n_cells):
-        face_id = int(model_face[cell_id]) if model_face is not None else -1
-        if face_id == int(inlet_face_id):
-            labels[cell_id] = 1
-            assignment_counts["inlet_face_override"] += 1
-            continue
-        mapped_segment = segment_by_terminal_face.get(face_id)
-        if mapped_segment is not None:
-            labels[cell_id] = int(mapped_segment)
-            assignment_counts["face_terminal_override"] += 1
-            continue
-        nearest_point_id = int(locator.FindClosestPoint(centers[cell_id]))
-        if nearest_point_id >= 0:
-            labels[cell_id] = int(locator_segment_array.GetTuple1(nearest_point_id))
-            assignment_counts["nearest_centerline"] += 1
-        else:
-            labels[cell_id] = 1
-            assignment_counts["fallback"] += 1
+    fixed = np.zeros((n_cells,), dtype=bool)
+    seed_counts = _build_segment_seeds(
+        labels,
+        assignment_mode,
+        seed_segment_id,
+        fixed,
+        centers,
+        model_face,
+        segments,
+        inlet_face_id,
+        segment_by_terminal_face,
+        distance_by_segment,
+        arclength_by_segment,
+        radius_by_segment,
+        barrier_segment_id,
+    )
+    assignment_counts.update(seed_counts)
+    assignment_counts["fixed_seed_cells"] = int(assignment_counts.get("inlet_face_seed_cells", 0)) + int(
+        assignment_counts.get("terminal_face_seed_cells", 0)
+    )
+
+    propagation_cost = _propagate_surface_labels(
+        centers,
+        adjacency,
+        labels,
+        assignment_mode,
+        fixed,
+        segments,
+        distance_by_segment,
+        radius_by_segment,
+        blocked_edges,
+    )
+    assignment_counts["propagated_cells"] = int(np.count_nonzero(assignment_mode == 4))
+    assignment_counts["fallback"] = _recover_unassigned_cells(labels, assignment_mode, nearest_segment)
+
+    cleanup_counts = {
+        "cleanup_relabel_components": 0,
+        "cleanup_relabel_cells": 0,
+        "cleanup_max_island_cells": 0,
+    }
+    if cleanup:
+        cleanup_counts = _cleanup_small_label_islands(
+            surface,
+            labels,
+            protected_face_ids,
+            assignment_mode,
+        )
+    assignment_counts.update(cleanup_counts)
 
     counts = {int(seg.segment_id): int(np.count_nonzero(labels == int(seg.segment_id))) for seg in segments}
     for seg in segments:
         seg.cell_count = counts.get(int(seg.segment_id), 0)
         seg.fallback_cell_count = 0
-    return labels, assignment_counts, counts
+    diagnostics = {
+        "AssignmentMode": assignment_mode,
+        "SeedSegmentId": seed_segment_id,
+        "PropagationCost": np.where(np.isfinite(propagation_cost), propagation_cost, -1.0),
+        "BarrierSegmentId": barrier_segment_id,
+        "NearestSegmentId": nearest_segment,
+        "RejectedSegmentId": rejected_segment,
+    }
+    return labels, assignment_counts, counts, diagnostics
 
 
 def _build_segments_surface(surface: vtk.vtkPolyData, labels: np.ndarray) -> vtk.vtkPolyData:
@@ -694,29 +1523,66 @@ def _build_segments_surface(surface: vtk.vtkPolyData, labels: np.ndarray) -> vtk
     return out
 
 
+def _build_debug_segments_surface(
+    surface: vtk.vtkPolyData,
+    labels: np.ndarray,
+    diagnostics: Dict[str, np.ndarray],
+) -> vtk.vtkPolyData:
+    out = _build_segments_surface(surface, labels)
+    for name, values in diagnostics.items():
+        vals = np.asarray(values)
+        if vals.dtype.kind in {"i", "u", "b"}:
+            add_int_cell_array(out, name, vals.astype(int).tolist())
+            continue
+        arr = vtk.vtkDoubleArray()
+        arr.SetName(name)
+        arr.SetNumberOfComponents(1)
+        arr.SetNumberOfTuples(int(vals.shape[0]))
+        for idx, value in enumerate(vals.tolist()):
+            arr.SetValue(idx, float(value))
+        out.GetCellData().AddArray(arr)
+    return out
+
+
 def _segment_contract_rows(segments: list[GeometrySegment], node_coords: dict[int, np.ndarray]) -> list[Dict[str, Any]]:
     rows: list[Dict[str, Any]] = []
     for seg in segments:
-        rows.append(
-            {
-                "segment_id": int(seg.segment_id),
-                "name_hint": str(seg.name_hint),
-                "segment_type": str(seg.segment_type),
-                "parent_segment_id": seg.parent_segment_id,
-                "child_segment_ids": [int(v) for v in sorted(seg.child_segment_ids)],
-                "proximal_node_id": int(seg.proximal_node),
-                "distal_node_id": int(seg.distal_node),
-                "proximal_point": node_coords.get(int(seg.proximal_node), seg.points[0]).tolist(),
-                "distal_point": node_coords.get(int(seg.distal_node), seg.points[-1]).tolist(),
-                "edge_ids": [int(eid) for eid in seg.edge_ids],
-                "length": float(seg.length),
-                "terminal_face_id": seg.terminal_face_id,
-                "terminal_face_name": seg.terminal_face_name,
-                "descendant_terminal_names": [str(v) for v in seg.descendant_terminal_names],
-                "cell_count": int(seg.cell_count),
-                "fallback_cell_count": int(seg.fallback_cell_count),
-            }
-        )
+        proximal_point = node_coords.get(int(seg.proximal_node), seg.points[0]) if seg.segment_type == "aorta_trunk" else seg.effective_proximal_point
+        row = {
+            "segment_id": int(seg.segment_id),
+            "name_hint": str(seg.name_hint),
+            "segment_type": str(seg.segment_type),
+            "parent_segment_id": seg.parent_segment_id,
+            "child_segment_ids": [int(v) for v in sorted(seg.child_segment_ids)],
+            "proximal_node_id": int(seg.proximal_node),
+            "distal_node_id": int(seg.distal_node),
+            "proximal_point": np.asarray(proximal_point, dtype=float).tolist(),
+            "distal_point": node_coords.get(int(seg.distal_node), seg.points[-1]).tolist(),
+            "edge_ids": [int(eid) for eid in seg.edge_ids],
+            "length": float(seg.length),
+            "terminal_face_id": seg.terminal_face_id,
+            "terminal_face_name": seg.terminal_face_name,
+            "descendant_terminal_names": [str(v) for v in seg.descendant_terminal_names],
+            "cell_count": int(seg.cell_count),
+            "fallback_cell_count": int(seg.fallback_cell_count),
+        }
+        if seg.proximal_boundary is not None:
+            row["proximal_boundary"] = seg.proximal_boundary.to_contract()
+            row["proximal_boundary_source"] = seg.proximal_boundary.source_type
+            row["proximal_boundary_confidence"] = float(seg.proximal_boundary.confidence)
+            row["proximal_boundary_arclength"] = float(seg.proximal_boundary.arclength)
+            row["proximal_boundary_selection_algorithm"] = PROXIMAL_BOUNDARY_SELECTION_ALGORITHM
+            if seg.proximal_boundary_warning:
+                row["proximal_boundary_warning"] = seg.proximal_boundary_warning
+        elif seg.segment_type != "aorta_trunk":
+            row["proximal_boundary_source"] = "step1_graph_node_fallback"
+            row["proximal_boundary_confidence"] = 0.45
+            row["proximal_boundary_arclength"] = 0.0
+            if seg.proximal_boundary_warning:
+                row["proximal_boundary_warning"] = seg.proximal_boundary_warning
+            if seg.proximal_boundary_attempts:
+                row["proximal_boundary_attempts"] = seg.proximal_boundary_attempts
+        rows.append(row)
     return rows
 
 
@@ -771,13 +1637,26 @@ def _make_contract(
 
     qa_status = status
     if status == "success":
+        boundary_requires_review = any("W_STEP2_PROXIMAL_BOUNDARY_" in str(w) for w in warnings)
         if fallback_pct > 0.15:
             qa_status = "failed"
             warnings.append("W_STEP2_FALLBACK_GT_15_PERCENT: fallback cell assignment exceeded 15%.")
         elif fallback_pct > 0.05 or priority_fallback:
             qa_status = "requires_review"
             warnings.append("W_STEP2_FALLBACK_REQUIRES_REVIEW: fallback assignment exceeded review policy.")
+        elif boundary_requires_review:
+            qa_status = "requires_review"
 
+    assignment_count_values = {
+        str(key): int(value)
+        for key, value in (assignment_counts or {}).items()
+        if isinstance(value, (int, np.integer))
+    }
+    seed_counts_by_segment = {
+        key.replace("seed_segment_", ""): int(value)
+        for key, value in assignment_count_values.items()
+        if key.startswith("seed_segment_")
+    }
     segment_rows = _segment_contract_rows(segments or [], node_coords or {}) if segments else []
     boundary = _boundary_summary(start_profile or {}, end_metadata or {}, face_node_map or {}) if start_profile and end_metadata else {}
     non_empty_segments = sum(1 for row in segment_rows if int(row.get("cell_count", 0)) > 0)
@@ -824,12 +1703,16 @@ def _make_contract(
             },
         },
         "qa_summary": {
+            "assignment_algorithm": "surface_seeded_propagation_v1",
             "total_surface_cells": int(total_cells or 0),
             "assigned_cells": assigned_cells,
             "unassigned_cells": 0 if total_cells is not None else None,
             "fallback_assigned_cells": total_fallback,
             "fallback_percentage": fallback_pct,
-            "assignment_mode_counts": assignment_counts or {},
+            "assignment_mode_counts": assignment_count_values,
+            "seed_counts_by_segment": seed_counts_by_segment,
+            "barrier_cell_count": assignment_count_values.get("barrier_cell_count", 0),
+            "blocked_edge_count": assignment_count_values.get("blocked_edge_count", 0),
             "non_empty_segment_count": int(non_empty_segments),
             "segment_count": int(len(segment_rows)),
             "aorta_start_confidence": (start_profile or {}).get("confidence"),
@@ -898,6 +1781,7 @@ def run_step2(args: argparse.Namespace) -> Dict[str, Any]:
 
     bif_node, bif_detail = _resolve_aortic_bifurcation_node(face_map, face_node_map, graph, inlet_node)
     segments, aorta_node_path = _build_segments(inlet_node, bif_node, graph, edges, face_map, face_node_map)
+    warnings.extend(_refine_branch_boundaries(surface, segments, face_node_map))
     aorta_segment = segments[0]
     aorta_length = float(aorta_segment.length)
     if aorta_length <= 0.0:
@@ -932,7 +1816,7 @@ def run_step2(args: argparse.Namespace) -> Dict[str, Any]:
         "source_components": ["centerline_landmark", "surface_derived_boundary_profile"],
     }
 
-    labels, assignment_counts, _ = _assign_surface_cells(surface, segments, inlet_face_id)
+    labels, assignment_counts, _, diagnostics = _assign_surface_cells(surface, segments, inlet_face_id)
     if int(np.count_nonzero(labels <= 0)) > 0:
         raise Step2Failure("Core segment assignment is too unreliable: some cells remained unassigned.")
     if len([seg for seg in segments if seg.cell_count > 0]) < 2:
@@ -943,14 +1827,26 @@ def run_step2(args: argparse.Namespace) -> Dict[str, Any]:
     write_vtp(build_polyline_polydata(aorta_segment.points), output_aorta)
 
     if args.write_debug:
-        debug_pd = build_polyline_polydata(aorta_segment.points)
+        debug_pd = _build_debug_segments_surface(surface, labels, diagnostics)
         write_vtp(debug_pd, output_boundary_debug)
+        boundary_debug = {
+            str(seg.segment_id): {
+                "name_hint": seg.name_hint,
+                "segment_type": seg.segment_type,
+                "selected_boundary": seg.proximal_boundary.to_contract() if seg.proximal_boundary is not None else None,
+                "warning": seg.proximal_boundary_warning,
+                "attempts": seg.proximal_boundary_attempts,
+            }
+            for seg in segments
+            if seg.segment_type != "aorta_trunk"
+        }
         write_json(
             {
                 "aorta_node_path": aorta_node_path,
                 "face_node_map": face_node_map,
                 "assignment_counts": assignment_counts,
                 "bifurcation_detail": bif_detail,
+                "branch_proximal_boundaries": boundary_debug,
             },
             output_debug_json,
         )
