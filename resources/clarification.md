@@ -41,6 +41,11 @@
 - STEP2 JSON should store summary + references.
 - Full geometry should remain in VTP outputs.
 - STEP2 should include major/minor diameter when available, but these are not required for step success.
+- STEP2 branch proximal boundaries must use `backward_refined_from_stable_section_v1` when refinement succeeds.
+- STEP2 must store the old stable daughter section only as `stable_section_reference` metadata, not as a competing vessel start.
+- STEP2 branch `proximal_boundary` metadata must include `backward_refinement` details: `step_mm`, `max_search_mm`, `accepted_step_count`, `stopped_reason`, `search_distance_mm`, `initial_stable_arclength`, `final_refined_arclength`, and `attempts`.
+- If backward refinement fails, STEP2 may retain the stable section as fallback but must mark `requires_review` and include warning text.
+- Future code changes must preserve exactly one `SegmentBoundaryProfile`, exactly one `_refine_branch_boundaries`, and must pass `py_compile` plus the AST duplicate-definition check.
 
 ### STEP2 fallback policy
 
@@ -111,17 +116,14 @@ Initial locked recommendation:
 
 - STEP4 must write a machine-readable JSON as a core output.
 - STEP4 core outputs are:
-  - `step4_measurements.json`
-  - `infrarenal_neck_colored.vtp`
-- STEP4 may optionally write a text report for debug/reference.
-- The STEP4 JSON must be a section-based grouped object.
-- If a value cannot be measured, it must use:
-  - `{ "status": "unmeasurable" }`
-- STEP4 must fail if one iliac diameter series is missing.
-- STEP4 JSON should contain summarized values only in the first implementation.
-- The colored VTP must at minimum visualize:
-  - proximal neck
-  - maximum aneurysm diameter
+  - `step4_geometry_measurements.json`
+  - `step4_infrarenal_neck_labeled.vtp`
+- STEP4 has no optional output in the active default contract.
+- The STEP4 JSON is a geometry measurement contract only.
+- STEP4 must mark missing or uncertain measurements with `not_available`, `requires_review`, or `failed_to_measure`.
+- STEP4 must preserve the full named surface in the labeled VTP.
+- The labeled VTP must label the infrarenal neck region with Step 4 cell-data arrays.
+- STEP4 must not choose a device, perform device sizing, perform clinical suitability assessment, or include Step 5 reporting.
 
 ### STEP5
 

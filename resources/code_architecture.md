@@ -188,6 +188,31 @@ It must include at minimum:
 - fallback details
 - QA status
 
+### Branch proximal boundary contract
+
+Branch proximal boundaries must be surface-authored, not raw graph-node cuts. Daughter-only cuts may identify a stable internal branch section, but that stable section is only a reference. The final vessel start must be selected by the active `backward_refined_from_stable_section_v1` workflow.
+
+The workflow is:
+
+- find the stable daughter section with `first_stable_surface_ostium_v2`
+- search backward toward the parent/daughter ostium along the same daughter centerline
+- use 0.1 mm arclength steps up to the configured maximum search distance
+- reject contours that become parent-contaminated, unstable, too large, too far from the daughter centerline, open, fragmented, or invalid
+- use the last accepted candidate as `proximal_boundary`
+- if no backward candidate is accepted, use the stable section as fallback and mark `requires_review`
+
+Every branch `proximal_boundary` in the contract must include:
+
+- existing compatibility fields: `source_type`, `centroid`, `normal`, `area`, `equivalent_diameter`, `major_diameter`, `minor_diameter`, `arclength`, `confidence`, `method`, `selection_algorithm`, and `attempts`
+- `stable_section_reference`
+- `backward_refinement`
+- `requires_review` when fallback or low-confidence review is needed
+- `warnings` when fallback, unresolved, or low-confidence selection occurs
+
+The code must stay clean: exactly one `SegmentBoundaryProfile`, one `_project_points_to_polyline`, one `_refine_branch_boundaries`, one stable-section extractor, one backward-refinement helper, no duplicate contradictory constants, no duplicate definitions, and no code after `return warnings` inside `_refine_branch_boundaries`.
+
+STEP3 must trust STEP2 `proximal_boundary` metadata while preserving source, confidence, review flags, and warnings in its own contract.
+
 ### Required aorta start and end definition
 
 #### Aorta start
@@ -383,7 +408,7 @@ Implementation rule:
 
 ---
 
-## STEP4 — Infrarenal Neck and Iliac Measurement Contract
+## STEP4 - Geometry Measurements and Infrarenal Neck Labeling
 
 ### Script name
 
@@ -391,68 +416,67 @@ Implementation rule:
 
 ### Role
 
-STEP4 performs the first EVAR-relevant measurement contract using STEP3 named and landmarked anatomy.
+STEP4 converts STEP3 named anatomy into structured 3D geometry measurements.
+
+STEP4 is a geometry-measurement stage. It does not choose a device, perform device sizing, perform clinical suitability assessment, or report Step 5 status.
 
 ### Inputs
 
 Required:
 
-- `named_segmentscolored.vtp`
-- `named_centerlines.vtp`
-- `step3_naming_orientation_contract.json`
+- `Output files/STEP3/named_segmentscolored.vtp`
+- `Output files/STEP3/named_centerlines.vtp`
+- `Output files/STEP3/step3_naming_orientation_contract.json`
 
 ### Core outputs
 
-- `step4_measurements.json`
-- `infrarenal_neck_colored.vtp`
+- `Output files/STEP4/step4_geometry_measurements.json`
+- `Output files/STEP4/step4_infrarenal_neck_labeled.vtp`
 
-### Optional outputs
-
-- optional text report for debugging/reference only
-
-### Visualization requirements for `infrarenal_neck_colored.vtp`
-
-The core colored VTP must visualize at least:
-
-- proximal neck region
-- maximum aneurysm diameter region
-
-This may be expanded later, but only these are required now.
+There are no other required STEP4 outputs.
 
 ### STEP4 JSON format
 
-The core JSON must be a **section-based grouped object**, not a flat list.
+The JSON is a geometry measurement contract with these top-level sections:
+
+- `step_name`
+- `schema_version`
+- `purpose`
+- `geometry_only`
+- `source_inputs`
+- `outputs`
+- `units`
+- `landmarks`
+- `aortic_neck`
+- `iliac`
+- `measurement_status`
+- `metadata`
 
 ### Required measurement scope
 
-The step must support the following summarized outputs when measurable:
+Measurement groups are limited to:
 
-- reference artery
-- proximal neck D0
-- proximal neck D5
-- proximal neck D10
-- proximal neck D15
-- proximal neck length
-- right common iliac D0
-- right common iliac D-10
-- right common iliac D-15
-- right common iliac D-20
-- right common iliac length
-- left common iliac D0
-- left common iliac D-10
-- left common iliac D-15
-- left common iliac D-20
-- left common iliac length
-- lowest renal to aortic bifurcation length
-- lowest renal to right iliac bifurcation length
-- lowest renal to left iliac bifurcation length
-- right external iliac access diameter
-- left external iliac access diameter
-- maximum external aneurysm diameter
+- landmarks for lowest renal artery and aortic bifurcation
+- aortic_neck diameters at D0, D10, and D15, reference diameter, neck length, neck end, and proximal neck angulation
+- left and right iliac treatment diameter and distal seal-zone geometry
+- measurement_status values
+- metadata warnings, assumptions, unavailable values, open questions, and discovered arrays
 
-### Unmeasurable fields
+### Labeled VTP
 
-If a value cannot be measured, it must use a structured status object:
+`step4_infrarenal_neck_labeled.vtp` preserves the full STEP3 named surface and adds cell-data arrays:
 
-```json
-{ "status": "unmeasurable" }
+- `Step4RegionId`
+- `InfrarenalNeckMask`
+- `Step4ColorRGB`
+- `Step4RegionName` when practical
+
+The infrarenal neck is labeled from the lowest renal aortic centerline position to the measured neck end. If the neck cannot be resolved but the full named surface is readable, STEP4 writes the full VTP with all mask values set to `0` and records the reason in JSON.
+
+### Acceptance
+
+- STEP4 has exactly two required outputs: JSON and labeled VTP.
+- STEP4 must not silently guess missing anatomy.
+- STEP4 must mark unavailable or uncertain measurements in JSON.
+- STEP4 must preserve the full model in the labeled VTP.
+- STEP4 must not introduce unrelated modules or speculative variables.

@@ -45,6 +45,20 @@
 - [ ] Fail if aortic end before bifurcation cannot be measured properly
 - [ ] Keep core VTP arrays minimal
 
+## STEP2 Proximal Boundary Refinement
+
+- [x] Clean duplicate/corrupt attempted proximal-boundary patch.
+- [x] Implement one active proximal-boundary control flow in `_refine_branch_boundaries`.
+- [x] Use `_extract_branch_stable_section_boundary` to find the internal daughter-section reference.
+- [x] Use `_refine_branch_ostium_backward_from_stable_section` to search backward toward the parent ostium.
+- [x] Use `backward_refined_from_stable_section_v1` for successful refined proximal boundaries.
+- [x] Add `stable_section_reference` metadata to every selected branch proximal boundary.
+- [x] Add `backward_refinement` metadata with step size, max search, accepted count, stop reason, arclengths, search distance, and attempts.
+- [x] Preserve STEP3 compatibility by keeping existing `segment_summary` proximal-boundary fields.
+- [x] Mark fallback or low-confidence proximal boundaries with `requires_review` and warning metadata.
+- [x] Enforce code hygiene: one `SegmentBoundaryProfile`, one `_project_points_to_polyline`, one `_refine_branch_boundaries`, no duplicate definitions, no contradictory constants, and no code after `return warnings`.
+- [x] Run acceptance checks: `py_compile`, AST duplicate-definition check, control-flow text check, and resources documentation check.
+
 ## STEP2 Optional Outputs
 
 - [ ] Implement one boundary-debug VTP only
@@ -100,42 +114,20 @@
 ## STEP4 Core Contract
 
 - [ ] Implement `Output files\STEP4`
-- [ ] Write `step4_measurements.json`
-- [ ] Write `infrarenal_neck_colored.vtp`
-- [ ] Keep JSON as section-based grouped object
-- [ ] Support structured unmeasurable field:
-  - [ ] `{ "status": "unmeasurable" }`
-- [ ] Measure proximal neck:
-  - [ ] D0
-  - [ ] D5
-  - [ ] D10
-  - [ ] D15
-  - [ ] neck length
-- [ ] Measure right common iliac:
-  - [ ] D0
-  - [ ] D-10
-  - [ ] D-15
-  - [ ] D-20
-  - [ ] length
-- [ ] Measure left common iliac:
-  - [ ] D0
-  - [ ] D-10
-  - [ ] D-15
-  - [ ] D-20
-  - [ ] length
-- [ ] Measure lowest renal to aortic bifurcation length
-- [ ] Measure lowest renal to right iliac bifurcation length
-- [ ] Measure lowest renal to left iliac bifurcation length
-- [ ] Measure right external iliac access diameter
-- [ ] Measure left external iliac access diameter
-- [ ] Measure maximum aneurysm diameter
-- [ ] Color proximal neck in the VTP
-- [ ] Color maximum aneurysm diameter region in the VTP
-- [ ] Fail if one iliac diameter series is missing
-
-## STEP4 Optional Output
-
-- [ ] Add optional `infrarenal_neck_report.txt` only for human debug/reference
+- [ ] Write `step4_geometry_measurements.json`
+- [ ] Write `step4_infrarenal_neck_labeled.vtp`
+- [ ] Keep JSON as a geometry measurement contract only
+- [ ] Measure landmarks: lowest renal artery and aortic bifurcation
+- [ ] Measure aortic neck diameters at D0, D10, and D15
+- [ ] Measure aortic neck reference diameter, length, end point, and proximal angulation
+- [ ] Measure left and right iliac landing-segment treatment diameters and distal seal-zone geometry
+- [ ] Record measurement statuses using `measured`, `not_available`, `requires_review`, or `failed_to_measure`
+- [ ] Record discovered Step 3 VTP arrays in metadata
+- [ ] Preserve the full named surface in the labeled VTP
+- [ ] Add `Step4RegionId`, `InfrarenalNeckMask`, and `Step4ColorRGB` cell-data arrays
+- [ ] Add `Step4RegionName` cell-data array if practical
+- [ ] Label only the infrarenal neck region in the VTP
+- [ ] Do not add device sizing, clinical pass/fail, access-risk scoring, hemodynamics, or Step 5 reporting
 
 ## STEP5 Manifest Layer
 

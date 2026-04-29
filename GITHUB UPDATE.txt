@@ -1,1 +1,9 @@
 Set-Location "C:\Users\ibrah\OneDrive\Desktop\Fluids Project\Vascular specific"; git remote set-url origin "https://github.com/Toralis-Labs/Aortic-Dynamics-Model.git"; git fetch origin; git checkout "V0.5-(Ibrahim)"; git add .; git commit -m "Update project files"; git push origin "V0.5-(Ibrahim)"
+
+Set-Location "C:\Users\ibrah\OneDrive\Desktop\Fluids Project\Vascular specific"; git remote set-url origin "https://github.com/Toralis-Labs/Aortic-Dynamics-Model.git"; git fetch origin; git checkout "rishu/segment-part-2"; git add .; git commit -m "Update segment part 2 files"; git push origin "rishu/segment-part-2"
+
+##Switch## 
+
+git fetch origin rishu/segment-part-2 && git switch rishu/segment-part-2 || git switch -c rishu/segment-part-2 origin/rishu/segment-part-2
+
+git fetch origin "V0.5-(Ibrahim)" && git switch "V0.5-(Ibrahim)" || git switch -c "V0.5-(Ibrahim)" origin/"V0.5-(Ibrahim)"

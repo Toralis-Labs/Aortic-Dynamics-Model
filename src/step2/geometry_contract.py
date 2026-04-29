@@ -40,7 +40,31 @@ from src.common.vtk_helpers import (
 )
 
 
-PROXIMAL_BOUNDARY_SELECTION_ALGORITHM = "first_stable_surface_ostium_v2"
+STABLE_SECTION_SELECTION_ALGORITHM = "first_stable_surface_ostium_v2"
+PROXIMAL_BOUNDARY_SELECTION_ALGORITHM = "backward_refined_from_stable_section_v1"
+
+BACKWARD_OSTIUM_REFINEMENT_STEP_MM = 0.1
+BACKWARD_OSTIUM_REFINEMENT_MAX_MM = 4.0
+BACKWARD_OSTIUM_DIAMETER_RATIO_STOP = 1.35
+BACKWARD_OSTIUM_AREA_RATIO_STOP = 1.80
+BACKWARD_OSTIUM_CENTROID_JUMP_RATIO_STOP = 0.50
+BACKWARD_OSTIUM_CENTERLINE_DISTANCE_RATIO_STOP = 0.60
+BACKWARD_OSTIUM_MIN_ACCEPTED_STEPS_FOR_REFINED = 1
+
+PRIORITY_PROXIMAL_BOUNDARY_NAMES = {
+    "left_renal_artery",
+    "right_renal_artery",
+    "superior_mesenteric_artery",
+    "inferior_mesenteric_artery",
+    "celiac_artery",
+    "celiac_proximal_candidate",
+    "left_common_iliac_candidate",
+    "right_common_iliac_candidate",
+    "left_internal_iliac",
+    "right_internal_iliac",
+    "left_external_iliac",
+    "right_external_iliac",
+}
 
 
 class Step2Failure(RuntimeError):
@@ -70,9 +94,10 @@ class SegmentBoundaryProfile:
     confidence: float
     method: str
     attempts: list[Dict[str, Any]] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_contract(self) -> Dict[str, Any]:
-        return {
+        row = {
             "source_type": self.source_type,
             "centroid": self.centroid.tolist(),
             "normal": unit(self.normal).tolist(),
@@ -86,6 +111,12 @@ class SegmentBoundaryProfile:
             "selection_algorithm": PROXIMAL_BOUNDARY_SELECTION_ALGORITHM,
             "attempts": self.attempts,
         }
+        for key, value in self.metadata.items():
+            if key in row:
+                row[f"metadata_{key}"] = value
+            else:
+                row[key] = value
+        return row
 
 
 @dataclass
@@ -754,7 +785,87 @@ def _project_points_to_polyline(points: np.ndarray, polyline: np.ndarray) -> tup
     return np.sqrt(np.maximum(best_d2, 0.0)).astype(float), best_s.astype(float)
 
 
-def _extract_branch_proximal_boundary(
+def _rank_branch_section_candidates(
+    profiles: list[Dict[str, Any]],
+    origin: np.ndarray,
+    branch_points: np.ndarray,
+    expected_area: Optional[float] = None,
+    expected_diameter: Optional[float] = None,
+) -> tuple[list[tuple[float, Dict[str, Any], Dict[str, float]]], Dict[str, int]]:
+    ranked: list[tuple[float, Dict[str, Any], Dict[str, float]]] = []
+    rejection_reasons: Dict[str, int] = {}
+
+    def reference_diameter_for(eq_diameter: Optional[float]) -> float:
+        if expected_diameter is not None and expected_diameter > 0.0:
+            return float(expected_diameter)
+        if eq_diameter is not None and float(eq_diameter) > 0.0:
+            return float(eq_diameter)
+        return 1.0
+
+    def add_rejection(reason: str) -> None:
+        rejection_reasons[reason] = int(rejection_reasons.get(reason, 0)) + 1
+
+    for profile in profiles:
+        centroid = np.asarray(profile["centroid"], dtype=float)
+        centroid_distance, _, _ = _project_point_to_polyline(centroid, branch_points)
+        origin_distance = distance(centroid, origin)
+        closed_gap = float(profile["closed_gap"])
+        area = float(profile["area"])
+        eq_diameter = profile.get("equivalent_diameter")
+        reference_diameter = reference_diameter_for(eq_diameter)
+        origin_tolerance = max(0.50, 0.90 * reference_diameter)
+        centroid_tolerance = max(0.40, 0.75 * reference_diameter)
+        normalized_origin_distance = origin_distance / max(reference_diameter, 1.0e-6)
+        normalized_centroid_distance = centroid_distance / max(reference_diameter, 1.0e-6)
+
+        candidate_rejections: list[str] = []
+        if origin_distance > origin_tolerance:
+            candidate_rejections.append("origin_distance_gt_normalized_tolerance")
+        if centroid_distance > centroid_tolerance:
+            candidate_rejections.append("centroid_distance_gt_normalized_tolerance")
+        if closed_gap > 1.0:
+            candidate_rejections.append("closed_gap_gt_1mm")
+        if area <= 1.0e-8:
+            candidate_rejections.append("nonpositive_area")
+        if expected_area is not None and expected_area > 0.0 and area > max(5.0 * float(expected_area), float(expected_area) + 10.0):
+            candidate_rejections.append("area_gt_expected_branch_limit")
+        if (
+            expected_diameter is not None
+            and expected_diameter > 0.0
+            and eq_diameter is not None
+            and float(eq_diameter) > max(2.75 * float(expected_diameter), float(expected_diameter) + 3.5)
+        ):
+            candidate_rejections.append("diameter_gt_expected_branch_limit")
+
+        if candidate_rejections:
+            for reason in candidate_rejections:
+                add_rejection(reason)
+            continue
+
+        origin_fraction = origin_distance / max(origin_tolerance, 1.0e-6)
+        centroid_fraction = centroid_distance / max(centroid_tolerance, 1.0e-6)
+        closure_fraction = closed_gap / max(0.25 * reference_diameter, 1.0e-6)
+        score = float(origin_fraction + 0.5 * centroid_fraction + 0.25 * closure_fraction)
+        ranked.append(
+            (
+                score,
+                profile,
+                {
+                    "origin_distance": float(origin_distance),
+                    "centroid_distance": float(centroid_distance),
+                    "normalized_origin_distance": float(normalized_origin_distance),
+                    "normalized_centroid_distance": float(normalized_centroid_distance),
+                    "origin_fraction": float(origin_fraction),
+                    "centroid_fraction": float(centroid_fraction),
+                    "reference_diameter": float(reference_diameter),
+                },
+            )
+        )
+
+    return ranked, rejection_reasons
+
+
+def _extract_branch_stable_section_boundary(
     surface: vtk.vtkPolyData,
     segment: GeometrySegment,
     expected_area: Optional[float] = None,
@@ -771,16 +882,6 @@ def _extract_branch_proximal_boundary(
 
     attempts: list[Dict[str, Any]] = []
     accepted_candidates: list[Dict[str, Any]] = []
-
-    def reference_diameter_for(eq_diameter: Optional[float]) -> float:
-        if expected_diameter is not None and expected_diameter > 0.0:
-            return float(expected_diameter)
-        if eq_diameter is not None and float(eq_diameter) > 0.0:
-            return float(eq_diameter)
-        return 1.0
-
-    def add_rejection(reasons: Dict[str, int], reason: str) -> None:
-        reasons[reason] = int(reasons.get(reason, 0)) + 1
 
     for offset_index, offset in enumerate(valid_offsets):
         origin = point_at_arclength(segment.points, float(offset))
@@ -800,65 +901,13 @@ def _extract_branch_proximal_boundary(
             attempts.append(attempt)
             continue
 
-        rejection_reasons: Dict[str, int] = {}
-        ranked: list[tuple[float, Dict[str, Any], Dict[str, float]]] = []
-        for profile in profiles:
-            centroid = np.asarray(profile["centroid"], dtype=float)
-            centroid_distance, _, _ = _project_point_to_polyline(centroid, segment.points)
-            origin_distance = distance(centroid, origin)
-            closed_gap = float(profile["closed_gap"])
-            area = float(profile["area"])
-            eq_diameter = profile.get("equivalent_diameter")
-            reference_diameter = reference_diameter_for(eq_diameter)
-            origin_tolerance = max(0.50, 0.90 * reference_diameter)
-            centroid_tolerance = max(0.40, 0.75 * reference_diameter)
-            normalized_origin_distance = origin_distance / max(reference_diameter, 1.0e-6)
-            normalized_centroid_distance = centroid_distance / max(reference_diameter, 1.0e-6)
-
-            candidate_rejections: list[str] = []
-            if origin_distance > origin_tolerance:
-                candidate_rejections.append("origin_distance_gt_normalized_tolerance")
-            if centroid_distance > centroid_tolerance:
-                candidate_rejections.append("centroid_distance_gt_normalized_tolerance")
-            if closed_gap > 1.0:
-                candidate_rejections.append("closed_gap_gt_1mm")
-            if area <= 1.0e-8:
-                candidate_rejections.append("nonpositive_area")
-            if expected_area is not None and expected_area > 0.0 and area > max(5.0 * float(expected_area), float(expected_area) + 10.0):
-                candidate_rejections.append("area_gt_expected_branch_limit")
-            if (
-                expected_diameter is not None
-                and expected_diameter > 0.0
-                and eq_diameter is not None
-                and float(eq_diameter) > max(2.75 * float(expected_diameter), float(expected_diameter) + 3.5)
-            ):
-                candidate_rejections.append("diameter_gt_expected_branch_limit")
-
-            if candidate_rejections:
-                for reason in candidate_rejections:
-                    add_rejection(rejection_reasons, reason)
-                continue
-
-            origin_fraction = origin_distance / max(origin_tolerance, 1.0e-6)
-            centroid_fraction = centroid_distance / max(centroid_tolerance, 1.0e-6)
-            closure_fraction = closed_gap / max(0.25 * reference_diameter, 1.0e-6)
-            score = float(origin_fraction + 0.5 * centroid_fraction + 0.25 * closure_fraction)
-            ranked.append(
-                (
-                    score,
-                    profile,
-                    {
-                        "origin_distance": float(origin_distance),
-                        "centroid_distance": float(centroid_distance),
-                        "normalized_origin_distance": float(normalized_origin_distance),
-                        "normalized_centroid_distance": float(normalized_centroid_distance),
-                        "origin_fraction": float(origin_fraction),
-                        "centroid_fraction": float(centroid_fraction),
-                        "reference_diameter": float(reference_diameter),
-                    },
-                )
-            )
-
+        ranked, rejection_reasons = _rank_branch_section_candidates(
+            profiles,
+            origin,
+            segment.points,
+            expected_area=expected_area,
+            expected_diameter=expected_diameter,
+        )
         attempt["rejection_reasons"] = rejection_reasons
         attempt["accepted_candidate_count"] = int(len(ranked))
         if not ranked:
@@ -881,7 +930,7 @@ def _extract_branch_proximal_boundary(
             confidence = min(confidence, 0.78)
 
         boundary = SegmentBoundaryProfile(
-            source_type="surface_ostium_plane_cut",
+            source_type="surface_stable_section_plane_cut",
             centroid=np.asarray(selected["centroid"], dtype=float),
             normal=unit(tangent),
             area=float(selected["area"]),
@@ -890,7 +939,7 @@ def _extract_branch_proximal_boundary(
             minor_diameter=selected["minor_diameter"],
             arclength=float(offset),
             confidence=float(confidence),
-            method=PROXIMAL_BOUNDARY_SELECTION_ALGORITHM,
+            method=STABLE_SECTION_SELECTION_ALGORITHM,
             attempts=[],
         )
         accepted_candidates.append(
@@ -966,6 +1015,228 @@ def _extract_branch_proximal_boundary(
     return boundary
 
 
+def _compact_stable_section_reference(stable_section: SegmentBoundaryProfile) -> Dict[str, Any]:
+    return {
+        "centroid": np.asarray(stable_section.centroid, dtype=float).tolist(),
+        "normal": unit(np.asarray(stable_section.normal, dtype=float)).tolist(),
+        "area": float(stable_section.area),
+        "equivalent_diameter": stable_section.equivalent_diameter,
+        "major_diameter": stable_section.major_diameter,
+        "minor_diameter": stable_section.minor_diameter,
+        "arclength": float(stable_section.arclength),
+        "method": stable_section.method,
+        "confidence": float(stable_section.confidence),
+    }
+
+
+def _is_priority_proximal_boundary(segment: GeometrySegment) -> bool:
+    name = str(segment.name_hint).strip().lower()
+    return name in PRIORITY_PROXIMAL_BOUNDARY_NAMES
+
+
+def _refine_branch_ostium_backward_from_stable_section(
+    surface: vtk.vtkPolyData,
+    segment: GeometrySegment,
+    stable_section: SegmentBoundaryProfile,
+) -> SegmentBoundaryProfile:
+    stable_area = float(stable_section.area)
+    stable_diameter = stable_section.equivalent_diameter
+    stable_diameter_value = float(stable_diameter) if stable_diameter is not None else 0.0
+    stable_arclength = float(stable_section.arclength)
+    stable_reference = _compact_stable_section_reference(stable_section)
+    attempts: list[Dict[str, Any]] = []
+    current_best: Optional[SegmentBoundaryProfile] = None
+    previous_centroid = np.asarray(stable_section.centroid, dtype=float)
+    accepted_step_count = 0
+    stopped_reason: Optional[str] = None
+
+    def metadata_for(
+        final_boundary: SegmentBoundaryProfile,
+        *,
+        accepted_count: int,
+        reason: str,
+        requires_review: bool = False,
+        warning: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        search_distance = max(0.0, stable_arclength - float(final_boundary.arclength)) if accepted_count else 0.0
+        backward_refinement: Dict[str, Any] = {
+            "step_mm": float(BACKWARD_OSTIUM_REFINEMENT_STEP_MM),
+            "max_search_mm": float(BACKWARD_OSTIUM_REFINEMENT_MAX_MM),
+            "accepted_step_count": int(accepted_count),
+            "stopped_reason": str(reason),
+            "search_distance_mm": float(search_distance),
+            "final_refined_arclength": float(final_boundary.arclength),
+            "initial_stable_arclength": float(stable_arclength),
+            "attempts": attempts,
+        }
+        metadata: Dict[str, Any] = {
+            "stable_section_reference": stable_reference,
+            "backward_refinement": backward_refinement,
+        }
+        if requires_review:
+            metadata["requires_review"] = True
+        if warning:
+            metadata["warnings"] = [warning]
+        return metadata
+
+    def fallback(reason: str) -> SegmentBoundaryProfile:
+        priority_note = " Priority proximal boundary requires review." if _is_priority_proximal_boundary(segment) else ""
+        warning = (
+            f"W_STEP2_PROXIMAL_BOUNDARY_BACKWARD_REFINEMENT_FALLBACK: segment {segment.segment_id} "
+            f"({segment.name_hint}) backward refinement failed ({reason}); stable section retained as fallback."
+            f"{priority_note}"
+        )
+        boundary = SegmentBoundaryProfile(
+            source_type=stable_section.source_type,
+            centroid=np.asarray(stable_section.centroid, dtype=float),
+            normal=unit(np.asarray(stable_section.normal, dtype=float)),
+            area=float(stable_section.area),
+            equivalent_diameter=stable_section.equivalent_diameter,
+            major_diameter=stable_section.major_diameter,
+            minor_diameter=stable_section.minor_diameter,
+            arclength=float(stable_section.arclength),
+            confidence=float(stable_section.confidence),
+            method="stable_section_fallback_after_backward_refinement_v1",
+            attempts=attempts,
+        )
+        boundary.metadata = metadata_for(
+            boundary,
+            accepted_count=0,
+            reason=reason,
+            requires_review=True,
+            warning=warning,
+        )
+        return boundary
+
+    if stable_area <= 0.0:
+        return fallback("stable_section_nonpositive_area")
+    if stable_diameter_value <= 0.0:
+        return fallback("stable_section_missing_equivalent_diameter")
+    if stable_arclength < BACKWARD_OSTIUM_REFINEMENT_STEP_MM - 1.0e-9:
+        return fallback("stable_section_too_close_to_branch_start_for_backward_step")
+
+    max_steps = int(round(BACKWARD_OSTIUM_REFINEMENT_MAX_MM / BACKWARD_OSTIUM_REFINEMENT_STEP_MM))
+    for step_index in range(1, max_steps + 1):
+        offset_from_stable = round(float(step_index) * BACKWARD_OSTIUM_REFINEMENT_STEP_MM, 10)
+        arclength = stable_arclength - offset_from_stable
+        if arclength < -1.0e-9:
+            stopped_reason = "branch_start_reached"
+            break
+        arclength = max(0.0, float(arclength))
+        origin = point_at_arclength(segment.points, arclength)
+        tangent = tangent_at_arclength(segment.points, arclength, window=0.75)
+        profiles = _contour_profiles_from_plane(surface, origin, tangent)
+        attempt: Dict[str, Any] = {
+            "offset_from_stable_mm": float(offset_from_stable),
+            "arclength": float(arclength),
+            "candidate_count": int(len(profiles)),
+            "accepted": False,
+            "rejection_reason": None,
+            "candidate_equivalent_diameter": None,
+            "candidate_area": None,
+            "candidate_centroid_distance_to_origin": None,
+            "candidate_centroid_jump_from_previous": None,
+            "diameter_ratio_to_stable": None,
+            "area_ratio_to_stable": None,
+        }
+        attempts.append(attempt)
+
+        if not profiles:
+            attempt["rejection_reason"] = "no_contour_candidate"
+            stopped_reason = str(attempt["rejection_reason"])
+            break
+
+        ranked, rejection_reasons = _rank_branch_section_candidates(
+            profiles,
+            origin,
+            segment.points,
+            expected_area=stable_area,
+            expected_diameter=stable_diameter_value,
+        )
+        if not ranked:
+            attempt["rejection_reason"] = "no_branch_like_candidate"
+            attempt["candidate_rejection_reasons"] = rejection_reasons
+            stopped_reason = str(attempt["rejection_reason"])
+            break
+
+        _, selected, metrics = min(ranked, key=lambda item: item[0])
+        centroid = np.asarray(selected["centroid"], dtype=float)
+        equivalent_diameter = selected.get("equivalent_diameter")
+        equivalent_diameter_value = float(equivalent_diameter) if equivalent_diameter is not None else 0.0
+        area = float(selected.get("area", 0.0))
+        centroid_distance_to_origin = float(metrics["origin_distance"])
+        centroid_jump = distance(centroid, previous_centroid)
+        diameter_ratio = equivalent_diameter_value / max(stable_diameter_value, 1.0e-6)
+        area_ratio = area / max(stable_area, 1.0e-8)
+        attempt.update(
+            {
+                "candidate_equivalent_diameter": equivalent_diameter,
+                "candidate_area": float(area),
+                "candidate_centroid_distance_to_origin": float(centroid_distance_to_origin),
+                "candidate_centroid_jump_from_previous": float(centroid_jump),
+                "diameter_ratio_to_stable": float(diameter_ratio),
+                "area_ratio_to_stable": float(area_ratio),
+            }
+        )
+
+        rejection_reason = None
+        if equivalent_diameter_value <= 0.0:
+            rejection_reason = "candidate_missing_equivalent_diameter"
+        elif area <= 0.0:
+            rejection_reason = "candidate_nonpositive_area"
+        elif diameter_ratio > BACKWARD_OSTIUM_DIAMETER_RATIO_STOP:
+            rejection_reason = "diameter_ratio_gt_stable_limit"
+        elif area_ratio > BACKWARD_OSTIUM_AREA_RATIO_STOP:
+            rejection_reason = "area_ratio_gt_stable_limit"
+        elif centroid_distance_to_origin > stable_diameter_value * BACKWARD_OSTIUM_CENTERLINE_DISTANCE_RATIO_STOP:
+            rejection_reason = "centroid_distance_to_origin_gt_stable_diameter_limit"
+        elif centroid_jump > stable_diameter_value * BACKWARD_OSTIUM_CENTROID_JUMP_RATIO_STOP:
+            rejection_reason = "centroid_jump_gt_stable_diameter_limit"
+        elif float(selected.get("closed_gap", 0.0)) > 1.0:
+            rejection_reason = "closed_gap_gt_1mm"
+        elif int(selected.get("point_count", 0)) < 3:
+            rejection_reason = "point_count_lt_3"
+
+        if rejection_reason is not None:
+            attempt["rejection_reason"] = rejection_reason
+            stopped_reason = rejection_reason
+            break
+
+        confidence = max(0.65, float(stable_section.confidence) - 0.05)
+        if float(selected.get("closed_gap", 0.0)) > 0.25:
+            confidence = min(confidence, max(0.65, float(stable_section.confidence) - 0.10))
+        current_best = SegmentBoundaryProfile(
+            source_type="surface_ostium_backward_refined_plane_cut",
+            centroid=centroid,
+            normal=unit(tangent),
+            area=float(area),
+            equivalent_diameter=equivalent_diameter,
+            major_diameter=selected["major_diameter"],
+            minor_diameter=selected["minor_diameter"],
+            arclength=float(arclength),
+            confidence=float(confidence),
+            method=PROXIMAL_BOUNDARY_SELECTION_ALGORITHM,
+            attempts=[],
+        )
+        previous_centroid = centroid
+        accepted_step_count += 1
+        attempt["accepted"] = True
+
+    if stopped_reason is None:
+        stopped_reason = "max_search_distance_reached"
+
+    if current_best is None or accepted_step_count < BACKWARD_OSTIUM_MIN_ACCEPTED_STEPS_FOR_REFINED:
+        return fallback(stopped_reason)
+
+    current_best.attempts = attempts
+    current_best.metadata = metadata_for(
+        current_best,
+        accepted_count=accepted_step_count,
+        reason=stopped_reason,
+    )
+    return current_best
+
+
 def _refine_branch_boundaries(
     surface: vtk.vtkPolyData,
     segments: list[GeometrySegment],
@@ -976,13 +1247,13 @@ def _refine_branch_boundaries(
         if segment.segment_type == "aorta_trunk":
             continue
         terminal = dict(face_node_map.get(int(segment.terminal_face_id), {}).get("termination", {})) if segment.terminal_face_id is not None else {}
-        boundary = _extract_branch_proximal_boundary(
+        stable_section = _extract_branch_stable_section_boundary(
             surface,
             segment,
             expected_area=float(terminal["area"]) if terminal.get("area") is not None else None,
             expected_diameter=float(terminal["diameter_eq"]) if terminal.get("diameter_eq") is not None else None,
         )
-        if boundary is None:
+        if stable_section is None:
             warning = (
                 f"W_STEP2_PROXIMAL_BOUNDARY_UNRESOLVED: segment {segment.segment_id} "
                 f"({segment.name_hint}) kept graph-node proximal start."
@@ -990,13 +1261,22 @@ def _refine_branch_boundaries(
             segment.proximal_boundary_warning = warning
             warnings.append(warning)
             continue
-        if float(boundary.confidence) < 0.75:
+        boundary = _refine_branch_ostium_backward_from_stable_section(surface, segment, stable_section)
+        boundary_warnings = [str(warning) for warning in boundary.metadata.get("warnings", [])]
+        segment_warnings: list[str] = []
+        if boundary_warnings:
+            segment_warnings.extend(boundary_warnings)
+        if not boundary.metadata.get("requires_review") and float(boundary.confidence) < 0.75:
             warning = (
                 f"W_STEP2_PROXIMAL_BOUNDARY_LOW_CONFIDENCE: segment {segment.segment_id} "
-                f"({segment.name_hint}) used fallback boundary selection."
+                f"({segment.name_hint}) has low-confidence proximal boundary selection."
             )
-            segment.proximal_boundary_warning = warning
-            warnings.append(warning)
+            boundary.metadata["requires_review"] = True
+            boundary.metadata.setdefault("warnings", []).append(warning)
+            segment_warnings.append(warning)
+        if segment_warnings:
+            segment.proximal_boundary_warning = " ".join(segment_warnings)
+            warnings.extend(segment_warnings)
         segment.proximal_boundary = boundary
         segment.proximal_boundary_attempts = boundary.attempts
     return warnings

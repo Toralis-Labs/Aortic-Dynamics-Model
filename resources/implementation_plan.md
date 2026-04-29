@@ -120,6 +120,33 @@ These optional outputs must not be required by downstream steps.
 - warnings
 - final status
 
+### STEP2 proximal branch boundary plan
+
+STEP2 must not use graph nodes as final branch starts. The graph and centerline network are routing/search skeletons; branch proximal boundaries must be authored from the surface.
+
+The active branch-start algorithm is `backward_refined_from_stable_section_v1`:
+
+1. find an internal stable daughter section using `first_stable_surface_ostium_v2`
+2. preserve that section as `stable_section_reference`
+3. walk backward toward the parent/daughter transition in 0.1 mm arclength steps
+4. reject backward candidates that become parent-contaminated, unstable, too large, too far from the daughter centerline, open, fragmented, or invalid
+5. use the last accepted backward candidate as `proximal_boundary`
+6. if no backward candidate is accepted, retain the stable section only as fallback and mark `requires_review`
+
+The branch `proximal_boundary` object must include `stable_section_reference` and `backward_refinement` metadata. `backward_refinement` must include `step_mm`, `max_search_mm`, `accepted_step_count`, `stopped_reason`, `search_distance_mm`, `initial_stable_arclength`, `final_refined_arclength`, and `attempts`.
+
+Code hygiene requirements for this implementation:
+
+- exactly one `SegmentBoundaryProfile`
+- exactly one `_project_points_to_polyline`
+- exactly one `_rank_branch_section_candidates`
+- exactly one `_extract_branch_stable_section_boundary`
+- exactly one `_refine_branch_ostium_backward_from_stable_section`
+- exactly one `_refine_branch_boundaries`
+- `_refine_branch_boundaries` must call the stable-section extractor and the backward-refinement function
+- old `_extract_branch_proximal_boundary` must not remain active
+- `py_compile` and AST duplicate-definition checks must pass
+
 ### STEP2 migration note
 
 Current logic from `segment2.py` should be reused selectively, but the new file must obey the reduced output contract and single-JSON rule.
@@ -204,35 +231,33 @@ Current logic from `orientation.py` should be split conceptually:
 
 ### Core outputs
 
-- `Output files\STEP4\step4_measurements.json`
-- `Output files\STEP4\infrarenal_neck_colored.vtp`
+- `Output files\STEP4\step4_geometry_measurements.json`
+- `Output files\STEP4\step4_infrarenal_neck_labeled.vtp`
 
 ### Optional outputs
 
-- `Output files\STEP4\infrarenal_neck_report.txt`
+- none
 
 ### Main implementation tasks
 
-1. resolve trunk and renal anchors from STEP3 contract
-2. locate D0, D5, D10, D15
-3. determine proximal neck length
-4. determine right and left common iliac diameter series and lengths
-5. determine lowest renal to aortic bifurcation length
-6. determine lowest renal to right/left iliac bifurcation lengths
-7. determine right and left external iliac access diameters
-8. determine maximum aneurysm diameter
-9. write grouped section-based JSON
-10. color proximal neck and aneurysm maximum-diameter region in VTP
+1. resolve abdominal aorta trunk and renal ostium anchors from STEP3 outputs
+2. locate D0, D10, and D15 downstream of the lowest renal artery
+3. measure aortic neck major, minor, and equivalent diameters at those sections
+4. determine aortic neck reference diameter, neck end, neck length, and proximal angulation
+5. measure left and right iliac distal seal-zone geometry and maximum major diameter in the selected landing segment
+6. write one grouped geometry measurement JSON
+7. write one labeled VTP preserving the full named surface and labeling the infrarenal neck
 
-### Hard failure rules
+### Step 4 rules
 
-- fail if a required iliac diameter series is missing
-- use structured `{ "status": "unmeasurable" }` for fields that cannot be measured individually
-- write optional debug explanation if the step fails
+- Step 4 must not silently guess missing anatomy.
+- Step 4 must mark unavailable or uncertain measurements in JSON.
+- Step 4 must still write the labeled VTP with a zero neck mask when the full named surface is readable but the neck cannot be resolved.
+- Step 4 must not perform device sizing, catalogue matching, oversizing, clinical suitability assessment, hemodynamics, CFD, access-risk scoring, device-selection logic, or Step 5 reporting.
 
 ### STEP4 migration note
 
-Current logic from `measure_infrarenal_neck.py` should be reused only after adapting it to the new path contracts and the machine-readable JSON-first design.
+Current logic from `measure_infrarenal_neck.py` may be referenced only for geometry measurement ideas. The active Step 4 contract is limited to `STEP4_GEOMETRY_MEASUREMENTS`, `step4_geometry_measurements.json`, and `step4_infrarenal_neck_labeled.vtp`.
 
 ---
 
@@ -331,10 +356,11 @@ Shared helpers may be extracted from existing scripts, but Codex must not alter 
 
 ### STEP4 accepted when
 
-- grouped machine-readable JSON exists
-- colored VTP exists
-- all required core measurements are present or explicitly structured as unmeasurable where allowed
-- missing required iliac series triggers fail
+- `step4_geometry_measurements.json` exists
+- `step4_infrarenal_neck_labeled.vtp` exists
+- the JSON contains only geometry measurement groups: `landmarks`, `aortic_neck`, `iliac`, `measurement_status`, and `metadata`
+- unavailable or uncertain anatomy is explicitly marked with status and warnings
+- the labeled VTP preserves the full model and labels the infrarenal neck region
 
 ### STEP5 accepted when
 

@@ -1,0 +1,181 @@
+{
+  "step_name": "STEP4_GEOMETRY_MEASUREMENTS",
+  "schema_version": "0.1.0",
+  "purpose": "3D geometry measurements from Step 3 named anatomy",
+  "geometry_only": true,
+  "source_inputs": {
+    "named_surface_vtp": "C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\Output files\\STEP3\\named_segmentscolored.vtp",
+    "named_centerlines_vtp": "C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\Output files\\STEP3\\named_centerlines.vtp",
+    "step3_contract_json": "C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\Output files\\STEP3\\step3_naming_orientation_contract.json"
+  },
+  "outputs": {
+    "geometry_measurements_json": "C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\Output files\\STEP4\\step4_geometry_measurements.json",
+    "infrarenal_neck_labeled_vtp": "C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\Output files\\STEP4\\step4_infrarenal_neck_labeled.vtp"
+  },
+  "units": {
+    "length": "mm",
+    "angle": "degrees"
+  },
+  "landmarks": {
+    "lowest_renal_artery_name": "right_renal_artery",
+    "lowest_renal_ostium_center_xyz": [
+      -1.061284,
+      16.336563,
+      76.300107
+    ],
+    "lowest_renal_aortic_centerline_s_mm": 11.800048,
+    "aortic_bifurcation_center_xyz": [
+      -1.022847,
+      17.346933,
+      65.880096
+    ],
+    "aortic_bifurcation_s_mm": 23.528728
+  },
+  "aortic_neck": {
+    "neck_diameter_D0_major_mm": 1.878565,
+    "neck_diameter_D0_minor_mm": 1.737978,
+    "neck_diameter_D0_equivalent_mm": 1.77404,
+    "neck_diameter_D10_major_mm": 3.295094,
+    "neck_diameter_D10_minor_mm": 3.047945,
+    "neck_diameter_D10_equivalent_mm": 3.145341,
+    "neck_diameter_D15_major_mm": null,
+    "neck_diameter_D15_minor_mm": null,
+    "neck_diameter_D15_equivalent_mm": null,
+    "neck_reference_diameter_mm": 3.295094,
+    "neck_reference_diameter_source": "D10_major",
+    "neck_length_mm": 6.0,
+    "neck_end_s_mm": 17.800048,
+    "neck_end_center_xyz": [
+      -1.551411,
+      18.61023,
+      70.947608
+    ],
+    "proximal_neck_angulation_deg": 22.035181,
+    "proximal_neck_angulation_category": "<=60_deg"
+  },
+  "iliac": {
+    "left": {
+      "iliac_treatment_diameter_mm": 1.419929,
+      "iliac_reference_diameter_source": "left_common_iliac_distal_seal_zone_max_major",
+      "distal_iliac_seal_zone_length_mm": 5.788626,
+      "distal_iliac_seal_zone_start_xyz": [
+        -1.022847,
+        17.346933,
+        65.880096
+      ],
+      "distal_iliac_seal_zone_end_xyz": [
+        -2.399549,
+        14.630635,
+        61.521706
+      ],
+      "selected_landing_segment": "left_common_iliac"
+    },
+    "right": {
+      "iliac_treatment_diameter_mm": 1.525501,
+      "iliac_reference_diameter_source": "right_common_iliac_distal_seal_zone_max_major",
+      "distal_iliac_seal_zone_length_mm": 7.375631,
+      "distal_iliac_seal_zone_start_xyz": [
+        -1.022847,
+        17.346933,
+        65.880096
+      ],
+      "distal_iliac_seal_zone_end_xyz": [
+        3.993186,
+        15.233983,
+        61.794964
+      ],
+      "selected_landing_segment": "right_common_iliac"
+    }
+  },
+  "measurement_status": {
+    "aortic_neck_diameter_measurement_status": "requires_review",
+    "aortic_neck_length_measurement_status": "measured",
+    "aortic_neck_angulation_measurement_status": "measured",
+    "left_iliac_diameter_measurement_status": "requires_review",
+    "right_iliac_diameter_measurement_status": "requires_review",
+    "left_iliac_seal_zone_measurement_status": "requires_review",
+    "right_iliac_seal_zone_measurement_status": "requires_review",
+    "overall_geometry_measurement_status": "requires_review"
+  },
+  "metadata": {
+    "measurement_confidence": "moderate",
+    "warnings": [
+      "W_STEP4_D15_BEYOND_BIFURCATION: aortic neck D15 section is not before bifurcation.",
+      "W_STEP4_ANGULATION_SHORT_DISTAL_VECTOR: less than 20 mm was available distal to neck_end for angulation.",
+      "W_STEP4_LEFT_ILIAC_SEAL_ZONE_SHORT: selected left_common_iliac has less than 10 mm available distal seal zone.",
+      "W_STEP4_RIGHT_ILIAC_SEAL_ZONE_SHORT: selected right_common_iliac has less than 10 mm available distal seal zone."
+    ],
+    "open_questions": [],
+    "not_available": [],
+    "assumptions": [
+      "abdominal_aorta_trunk centerline is treated as proximal/inlet to distal/bifurcation when projecting downstream arclength.",
+      "neck_reference_diameter_mm uses the maximum available major diameter among D0, D10, and D15.",
+      "iliac seal-zone geometry is measured on the distal-most up to 20 mm of the selected iliac segment."
+    ],
+    "discovered_arrays": {
+      "named_surface": {
+        "point_data": [],
+        "cell_data": [
+          {
+            "name": "SegmentId",
+            "class_name": "vtkTypeInt32Array",
+            "components": 1,
+            "tuples": 231992
+          },
+          {
+            "name": "SegmentName",
+            "class_name": "vtkStringArray",
+            "components": 1,
+            "tuples": 231992
+          },
+          {
+            "name": "SegmentColorRGB",
+            "class_name": "vtkTypeUInt8Array",
+            "components": 3,
+            "tuples": 231992
+          }
+        ],
+        "field_data": [],
+        "point_count": 115998,
+        "cell_count": 231992,
+        "line_count": 0,
+        "polygon_count": 231992
+      },
+      "named_centerlines": {
+        "point_data": [],
+        "cell_data": [
+          {
+            "name": "SegmentId",
+            "class_name": "vtkTypeInt32Array",
+            "components": 1,
+            "tuples": 14
+          },
+          {
+            "name": "SegmentName",
+            "class_name": "vtkStringArray",
+            "components": 1,
+            "tuples": 14
+          }
+        ],
+        "field_data": [],
+        "point_count": 342,
+        "cell_count": 14,
+        "line_count": 14,
+        "polygon_count": 0
+      }
+    },
+    "coordinate_system": {
+      "name": "source_model_coordinates",
+      "units": "mm"
+    },
+    "source_inputs": {
+      "named_surface_vtp": "C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\Output files\\STEP3\\named_segmentscolored.vtp",
+      "named_centerlines_vtp": "C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\Output files\\STEP3\\named_centerlines.vtp",
+      "step3_contract_json": "C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\Output files\\STEP3\\step3_naming_orientation_contract.json"
+    },
+    "units": {
+      "length": "mm",
+      "angle": "degrees"
+    }
+  }
+}

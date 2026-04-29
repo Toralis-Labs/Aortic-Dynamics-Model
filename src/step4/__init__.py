@@ -1,2 +1,1 @@
-"""STEP4 infrarenal measurement scaffold."""
-
+"""STEP4 geometry measurements and infrarenal neck labeling."""
