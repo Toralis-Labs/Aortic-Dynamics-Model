@@ -2,10 +2,21 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Run orientnew_surface_transfer_candidate.py",
+      "name": "STEP2: geometry contract",
       "type": "debugpy",
       "request": "launch",
-      "program": "${workspaceFolder}\\orientnew_surface_transfer_candidate.py",
+      "program": "${workspaceFolder}\\step2_geometry_contract.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "env": {
+        "CONDA_DLL_SEARCH_MODIFICATION_ENABLE": "1"
+      }
+    },
+    {
+      "name": "STEP3: naming orientation",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\step3_naming_orientation.py",
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "env": {

@@ -81,6 +81,8 @@ def _iter_vmtk_python_candidates() -> List[str]:
 
     _add(os.environ.get(_AUTO_VMTK_PYTHON_ENV, ""))
     _add(os.path.join(os.environ.get("CONDA_PREFIX", ""), "python.exe"))
+    _add(os.path.join(SCRIPT_DIR, ".tools", "m", "envs", "vmtk-step2", "python.exe"))
+    _add(os.path.join(SCRIPT_DIR, ".tools", "micromamba_root", "envs", "vmtk-step2", "python.exe"))
 
     home = os.path.expanduser("~")
     conda_roots = [
@@ -89,7 +91,7 @@ def _iter_vmtk_python_candidates() -> List[str]:
         os.path.join(home, "mambaforge"),
         os.path.join(home, "miniforge3"),
     ]
-    env_names = ("vmtk_env", "vmtk", "simvascular", "sv")
+    env_names = ("vmtk-step2", "vmtk_env", "vmtk", "simvascular", "sv")
     for root in conda_roots:
         for env_name in env_names:
             _add(os.path.join(root, "envs", env_name, "python.exe"))

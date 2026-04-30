@@ -1,0 +1,46 @@
+# Local runtime environments
+.tools/
+.venv/
+venv/
+env/
+
+# Python caches and test/build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Pipeline-generated artifacts
+Output files/
+_neck_chunks/
+*.pypart
+
+# Local archives and large demo media
+Archive/
+Archive.zip
+*.zip
+*.7z
+*.rar
+*.mp4
+*.avi
+*.mov
+
+# Legacy prompt dumps and one-off local notes
+Prompts/
+GITHUB UPDATE.txt
+instructions*.txt
+*_instruction.txt
+orientation_code_instructions.txt
+segment2 instructions.txt
+segmentvessel_instruction.txt
+step1segment_instruction.txt
+explain_segmentvessel.txt
+
+# IDE/system noise
+.DS_Store
+Thumbs.db

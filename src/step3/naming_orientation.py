@@ -150,17 +150,7 @@ def _normalize_step2_contract(raw: Dict[str, Any]) -> Step2ContractView:
         except Exception:
             continue
 
-    if "step_name" in raw:
-        contract_mode = "canonical"
-        step_status = str(raw.get("step_status", "failed"))
-        warnings = [str(v) for v in raw.get("warnings", [])]
-        segment_rows = list(raw.get("segment_summary", []))
-        aorta_start = dict(raw.get("aorta_start") or {})
-        aorta_end = dict(raw.get("aorta_end") or {})
-        upstream_references = dict(raw.get("upstream_references") or {})
-        coordinate_system = dict(raw.get("coordinate_system") or {})
-        units = raw.get("units")
-    else:
+    if "step_name" not in raw:
         contract_mode = "legacy"
         step_status = str(raw.get("final_status") or raw.get("status") or "failed")
         warnings = [str(v) for v in raw.get("warnings", [])]
@@ -170,6 +160,18 @@ def _normalize_step2_contract(raw: Dict[str, Any]) -> Step2ContractView:
         upstream_references = dict(raw.get("upstream_step1_references") or {})
         coordinate_system = dict(raw.get("coordinate_system") or {})
         units = coordinate_system.get("units")
+    else:
+        contract_mode = "canonical"
+        if raw.get("step_name") != "step2_geometry_contract":
+            raise Step3Failure(f"STEP2 contract has unexpected step_name: {raw.get('step_name')}")
+        step_status = str(raw.get("step_status", "failed"))
+        warnings = [str(v) for v in raw.get("warnings", [])]
+        segment_rows = list(raw.get("segment_summary", []))
+        aorta_start = dict(raw.get("aorta_start") or {})
+        aorta_end = dict(raw.get("aorta_end") or {})
+        upstream_references = dict(raw.get("upstream_references") or {})
+        coordinate_system = dict(raw.get("coordinate_system") or {})
+        units = raw.get("units")
 
     if not segment_rows:
         raise Step3Failure("STEP2 contract is missing segment_summary; STEP3 cannot name segments.")
