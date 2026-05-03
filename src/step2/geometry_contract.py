@@ -96,6 +96,15 @@ BRANCH_RING_SEARCH_FRACTION = 0.35
 BRANCH_RING_SEARCH_STEP_MM = 0.25
 BACKWARD_REFINE_STEP_MM = 0.10
 MIN_CUT_COMPONENT_POINTS = 8
+ZERO_OFFSET_TOLERANCE_MM = 0.05
+MIN_STABLE_COMPACTNESS = 0.80
+MIN_STABLE_SCORE = 0.75
+MAX_STABLE_PARENT_CONTAMINATION = 0.25
+MAX_SUCCESS_PARENT_CONTAMINATION = 0.30
+MAX_REJECT_PARENT_CONTAMINATION = 0.45
+MAX_STABLE_RADIUS_SPREAD_RATIO = 0.45
+MAX_CLEAN_RADIUS_RATIO = 1.40
+MAX_ZERO_OFFSET_RADIUS_RATIO_DELTA = 0.20
 
 
 class GeometrySegmentationFailure(RuntimeError):
@@ -943,146 +952,431 @@ def _candidate_offsets(branch_length: float) -> tuple[list[float], float]:
     return sorted(set(offsets)), float(max_search)
 
 
-def _is_candidate_basically_tubular(candidate: dict[str, Any], reference_radius: Optional[float]) -> bool:
-    radius = candidate.get("equivalent_radius_mm")
-    if radius is None:
-        return False
-    radius_f = _safe_float(radius, float("nan"))
-    if not math.isfinite(radius_f) or radius_f <= 0.05:
+def _round_float(value: Any, ndigits: int = 6) -> Optional[float]:
+    value_f = _safe_float(value, float("nan"))
+    if not math.isfinite(value_f):
+        return None
+    return round(float(value_f), int(ndigits))
+
+
+def _candidate_offset(candidate: dict[str, Any]) -> float:
+    return _safe_float(candidate.get("offset_mm"), 0.0)
+
+
+def _candidate_radius(candidate: dict[str, Any]) -> float:
+    return _safe_float(candidate.get("equivalent_radius_mm"), float("nan"))
+
+
+def _candidate_spread_ratio(candidate: dict[str, Any]) -> float:
+    radius = _candidate_radius(candidate)
+    if not math.isfinite(radius) or radius <= EPS:
+        return float("inf")
+    return _safe_float(candidate.get("radius_spread_mm"), float("inf")) / max(radius, EPS)
+
+
+def _candidate_centroid_ratio(candidate: dict[str, Any]) -> float:
+    radius = _candidate_radius(candidate)
+    if not math.isfinite(radius) or radius <= EPS:
+        return float("inf")
+    return _safe_float(candidate.get("centroid_distance_to_centerline_mm"), float("inf")) / max(radius, EPS)
+
+
+def _candidate_is_valid_surface_cut(candidate: dict[str, Any]) -> bool:
+    radius = _candidate_radius(candidate)
+    if not math.isfinite(radius) or radius <= 0.05:
         return False
     if int(candidate.get("selected_component_point_count") or 0) < MIN_CUT_COMPONENT_POINTS:
         return False
-
-    centroid_distance = _safe_float(candidate.get("centroid_distance_to_centerline_mm"), float("inf"))
-    spread = _safe_float(candidate.get("radius_spread_mm"), float("inf"))
-    radial_cv = _safe_float(candidate.get("_radial_cv"), float("inf"))
-    compactness = _safe_float(candidate.get("compactness_score"), 0.0)
-
-    if centroid_distance > max(1.25 * radius_f, 0.75):
-        return False
-    if spread > max(1.35 * radius_f, 0.75):
-        return False
-    if radial_cv > 0.50:
-        return False
-    if compactness < 0.08:
-        return False
-    if reference_radius is not None and reference_radius > EPS and radius_f > 1.85 * reference_radius:
+    if _safe_float(candidate.get("compactness_score"), 0.0) <= 0.0:
         return False
     return True
 
 
-def _classify_branch_start_candidates(candidates: list[dict[str, Any]]) -> None:
-    valid_radii: list[float] = []
+def _candidate_quality_score(candidate: dict[str, Any]) -> float:
+    if not _candidate_is_valid_surface_cut(candidate):
+        return -1.0e6
+    offset = _candidate_offset(candidate)
+    compactness = _safe_float(candidate.get("compactness_score"), 0.0)
+    stability = _safe_float(candidate.get("stability_score"), 0.0)
+    parent_score = _safe_float(candidate.get("parent_contamination_score"), 1.0)
+    spread_ratio = min(2.0, _candidate_spread_ratio(candidate))
+    centroid_ratio = min(2.0, _candidate_centroid_ratio(candidate))
+    return (
+        stability
+        + 0.35 * compactness
+        - 0.75 * parent_score
+        - 0.25 * spread_ratio
+        - 0.25 * centroid_ratio
+        + min(0.10, 0.02 * max(0.0, offset))
+    )
+
+
+def _candidate_reference_eligible(candidate: dict[str, Any], *, relaxed: bool, allow_zero: bool) -> bool:
+    if not _candidate_is_valid_surface_cut(candidate):
+        return False
+    if not allow_zero and _candidate_offset(candidate) <= ZERO_OFFSET_TOLERANCE_MM:
+        return False
+
+    radius = _candidate_radius(candidate)
+    compactness = _safe_float(candidate.get("compactness_score"), 0.0)
+    parent_score = _safe_float(candidate.get("parent_contamination_score"), 1.0)
+    stability = _safe_float(candidate.get("stability_score"), 0.0)
+    centroid_distance = _safe_float(candidate.get("centroid_distance_to_centerline_mm"), float("inf"))
+    spread_ratio = _candidate_spread_ratio(candidate)
+
+    min_compactness = 0.70 if relaxed else MIN_STABLE_COMPACTNESS
+    max_parent = 0.40 if relaxed else MAX_STABLE_PARENT_CONTAMINATION
+    min_stability = 0.58 if relaxed else MIN_STABLE_SCORE
+    max_spread_ratio = 0.75 if relaxed else MAX_STABLE_RADIUS_SPREAD_RATIO
+    centroid_limit = max(0.35 if relaxed else 0.25, (1.00 if relaxed else 0.75) * radius)
+
+    return bool(
+        compactness >= min_compactness
+        and parent_score <= max_parent
+        and stability >= min_stability
+        and spread_ratio <= max_spread_ratio
+        and centroid_distance <= centroid_limit
+    )
+
+
+def _stable_candidate_groups(candidates: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    ordered = sorted(candidates, key=lambda item: _candidate_offset(item))
+    groups: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    max_gap = max(BRANCH_RING_SEARCH_STEP_MM + 1.0e-6, 2.5 * BACKWARD_REFINE_STEP_MM)
+
+    for candidate in ordered:
+        if not current:
+            current = [candidate]
+            continue
+        if _candidate_offset(candidate) - _candidate_offset(current[-1]) <= max_gap:
+            current.append(candidate)
+        else:
+            groups.append(current)
+            current = [candidate]
+    if current:
+        groups.append(current)
+
+    plateau_groups: list[list[dict[str, Any]]] = []
+    for group in groups:
+        radii = [_candidate_radius(candidate) for candidate in group if _candidate_is_valid_surface_cut(candidate)]
+        if not radii:
+            continue
+        if len(radii) == 1:
+            plateau_groups.append(group)
+            continue
+        median_radius = float(np.median(radii))
+        radius_cv = float(np.std(radii) / max(median_radius, EPS))
+        if radius_cv <= 0.25:
+            plateau_groups.append(group)
+    return plateau_groups or groups
+
+
+def _stable_group_score(group: list[dict[str, Any]]) -> float:
+    radii = [_candidate_radius(candidate) for candidate in group if _candidate_is_valid_surface_cut(candidate)]
+    radius_cv = 0.0
+    if len(radii) > 1:
+        radius_cv = float(np.std(radii) / max(float(np.median(radii)), EPS))
+    avg_stability = float(np.mean([_safe_float(c.get("stability_score"), 0.0) for c in group]))
+    avg_compactness = float(np.mean([_safe_float(c.get("compactness_score"), 0.0) for c in group]))
+    avg_parent = float(np.mean([_safe_float(c.get("parent_contamination_score"), 1.0) for c in group]))
+    avg_spread = float(np.mean([min(2.0, _candidate_spread_ratio(c)) for c in group]))
+    median_offset = float(np.median([_candidate_offset(c) for c in group]))
+    length_bonus = min(0.12, 0.04 * len(group))
+    distal_bonus = min(0.12, 0.025 * max(0.0, median_offset))
+    return avg_stability + 0.30 * avg_compactness - 0.65 * avg_parent - 0.25 * avg_spread - 0.25 * radius_cv + length_bonus + distal_bonus
+
+
+def _choose_stable_reference_from_group(group: list[dict[str, Any]]) -> tuple[dict[str, Any], float, list[dict[str, Any]]]:
+    best_group = max(_stable_candidate_groups(group), key=_stable_group_score)
+    reference_candidate = max(best_group, key=_candidate_quality_score)
+    reference_radius = float(np.median([_candidate_radius(candidate) for candidate in best_group]))
+    return reference_candidate, reference_radius, best_group
+
+
+def _find_stable_daughter_reference(
+    candidates: list[dict[str, Any]],
+) -> tuple[Optional[dict[str, Any]], Optional[float], list[dict[str, Any]], bool]:
+    strict = [
+        candidate
+        for candidate in candidates
+        if _candidate_reference_eligible(candidate, relaxed=False, allow_zero=False)
+    ]
+    if strict:
+        reference_candidate, reference_radius, reference_group = _choose_stable_reference_from_group(strict)
+        return reference_candidate, reference_radius, reference_group, False
+
+    relaxed = [
+        candidate
+        for candidate in candidates
+        if _candidate_reference_eligible(candidate, relaxed=True, allow_zero=False)
+    ]
+    if relaxed:
+        reference_candidate, reference_radius, reference_group = _choose_stable_reference_from_group(relaxed)
+        return reference_candidate, reference_radius, reference_group, True
+
+    zero_only = [
+        candidate
+        for candidate in candidates
+        if _candidate_reference_eligible(candidate, relaxed=False, allow_zero=True)
+        and _candidate_offset(candidate) <= ZERO_OFFSET_TOLERANCE_MM
+    ]
+    if zero_only:
+        reference_candidate, reference_radius, reference_group = _choose_stable_reference_from_group(zero_only)
+        return reference_candidate, reference_radius, reference_group, True
+
+    return None, None, [], True
+
+
+def _candidate_clean_rejection_reasons(
+    candidate: dict[str, Any],
+    reference_radius: float,
+    reference_candidate: dict[str, Any],
+    *,
+    relaxed: bool,
+) -> list[str]:
+    if not _candidate_is_valid_surface_cut(candidate):
+        return ["surface cut did not produce a valid compact component"]
+
+    radius = _candidate_radius(candidate)
+    radius_ratio = radius / max(reference_radius, EPS)
+    parent_score = _safe_float(candidate.get("parent_contamination_score"), 1.0)
+    reference_parent = _safe_float(reference_candidate.get("parent_contamination_score"), 1.0)
+    compactness = _safe_float(candidate.get("compactness_score"), 0.0)
+    reference_compactness = _safe_float(reference_candidate.get("compactness_score"), compactness)
+    stability = _safe_float(candidate.get("stability_score"), 0.0)
+    reference_stability = _safe_float(reference_candidate.get("stability_score"), stability)
+    centroid_distance = _safe_float(candidate.get("centroid_distance_to_centerline_mm"), float("inf"))
+    spread_ratio = _candidate_spread_ratio(candidate)
+    reference_spread_ratio = _candidate_spread_ratio(reference_candidate)
+
+    parent_limit = min(
+        0.36 if relaxed else MAX_SUCCESS_PARENT_CONTAMINATION,
+        max(MAX_STABLE_PARENT_CONTAMINATION, reference_parent + (0.12 if relaxed else 0.08)),
+    )
+    compactness_floor = max(0.64 if relaxed else 0.72, min(MIN_STABLE_COMPACTNESS, reference_compactness - (0.20 if relaxed else 0.12)))
+    stability_floor = max(0.50 if relaxed else 0.62, min(MIN_STABLE_SCORE, reference_stability - (0.26 if relaxed else 0.18)))
+    spread_limit = max(0.58 if not relaxed else 0.75, min(0.90, reference_spread_ratio + (0.35 if relaxed else 0.25)))
+    centroid_limit = max(0.35 if relaxed else 0.25, 0.85 * reference_radius, 0.65 * radius)
+
+    reasons: list[str] = []
+    if parent_score >= MAX_REJECT_PARENT_CONTAMINATION:
+        reasons.append("parent contamination score is high")
+    elif parent_score > parent_limit:
+        reasons.append("parent contamination is higher than the distal stable reference")
+    if radius_ratio > MAX_CLEAN_RADIUS_RATIO:
+        reasons.append("cut radius is much larger than the distal stable daughter reference")
+    if radius_ratio < 0.45:
+        reasons.append("cut radius is much smaller than the distal stable daughter reference")
+    if compactness < compactness_floor:
+        reasons.append("compactness is below the distal stable daughter reference")
+    if stability < stability_floor:
+        reasons.append("stability is below the distal stable daughter reference")
+    if spread_ratio > spread_limit:
+        reasons.append("radius spread is above the distal stable daughter reference")
+    if centroid_distance > centroid_limit:
+        reasons.append("cut component centroid drifts from the child centerline")
+    return reasons
+
+
+def _candidate_clean_against_reference(
+    candidate: dict[str, Any],
+    reference_radius: float,
+    reference_candidate: dict[str, Any],
+    *,
+    relaxed: bool,
+) -> bool:
+    return not _candidate_clean_rejection_reasons(
+        candidate,
+        reference_radius,
+        reference_candidate,
+        relaxed=relaxed,
+    )
+
+
+def _best_candidate_by_offset(candidates: list[dict[str, Any]]) -> dict[float, dict[str, Any]]:
+    by_offset: dict[float, dict[str, Any]] = {}
     for candidate in candidates:
-        radius = candidate.get("equivalent_radius_mm")
-        radius_f = _safe_float(radius, float("nan"))
-        if not math.isfinite(radius_f) or radius_f <= 0.05:
-            continue
-        if int(candidate.get("selected_component_point_count") or 0) < MIN_CUT_COMPONENT_POINTS:
-            continue
-        if _safe_float(candidate.get("compactness_score"), 0.0) <= 0.0:
-            continue
-        valid_radii.append(radius_f)
+        offset = round(_candidate_offset(candidate), 6)
+        previous = by_offset.get(offset)
+        if previous is None or _candidate_quality_score(candidate) > _candidate_quality_score(previous):
+            by_offset[offset] = candidate
+    return by_offset
 
-    reference_radius: Optional[float] = None
-    if valid_radii:
-        sorted_radii = sorted(valid_radii)
-        lower_half = sorted_radii[: max(1, len(sorted_radii) // 2 + 1)]
-        reference_radius = float(np.median(lower_half))
 
-    first_stable_offset: Optional[float] = None
-    first_stable_score = 0.0
-    for candidate in sorted(candidates, key=lambda item: float(item.get("offset_mm", 0.0))):
-        if candidate.get("equivalent_radius_mm") is None:
+def _choose_fallback_surface_candidate(candidates: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    valid = [candidate for candidate in candidates if _candidate_is_valid_surface_cut(candidate)]
+    if not valid:
+        return None
+    nonzero = [candidate for candidate in valid if _candidate_offset(candidate) > ZERO_OFFSET_TOLERANCE_MM]
+    if nonzero:
+        best_nonzero = max(nonzero, key=_candidate_quality_score)
+        best_any = max(valid, key=_candidate_quality_score)
+        if _candidate_quality_score(best_nonzero) >= _candidate_quality_score(best_any) - 0.15:
+            return best_nonzero
+    return max(valid, key=_candidate_quality_score)
+
+
+def _zero_offset_proof(
+    candidates: list[dict[str, Any]],
+    selected_candidate: dict[str, Any],
+    reference_candidate: Optional[dict[str, Any]],
+    reference_radius: Optional[float],
+) -> tuple[bool, str]:
+    if _candidate_offset(selected_candidate) > ZERO_OFFSET_TOLERANCE_MM:
+        return False, ""
+    if reference_candidate is None or reference_radius is None or reference_radius <= EPS:
+        return False, "no distal stable daughter reference was available"
+    if _candidate_offset(reference_candidate) <= ZERO_OFFSET_TOLERANCE_MM:
+        return False, "stable daughter reference did not move beyond the topology origin"
+
+    selected_radius = _candidate_radius(selected_candidate)
+    selected_parent = _safe_float(selected_candidate.get("parent_contamination_score"), 1.0)
+    selected_compactness = _safe_float(selected_candidate.get("compactness_score"), 0.0)
+    reference_compactness = _safe_float(reference_candidate.get("compactness_score"), selected_compactness)
+    selected_stability = _safe_float(selected_candidate.get("stability_score"), 0.0)
+    reference_stability = _safe_float(reference_candidate.get("stability_score"), selected_stability)
+    selected_centroid = _safe_float(selected_candidate.get("centroid_distance_to_centerline_mm"), float("inf"))
+
+    if selected_parent > MAX_STABLE_PARENT_CONTAMINATION:
+        return False, "zero-offset parent contamination exceeded the clean daughter threshold"
+    radius_delta = abs(selected_radius - reference_radius) / max(reference_radius, EPS)
+    if radius_delta > MAX_ZERO_OFFSET_RADIUS_RATIO_DELTA:
+        return False, "zero-offset radius did not match the distal stable daughter reference"
+    if selected_compactness < max(MIN_STABLE_COMPACTNESS, reference_compactness - 0.05):
+        return False, "zero-offset compactness was not comparable to the distal stable reference"
+    if selected_centroid > max(0.25, 0.50 * reference_radius):
+        return False, "zero-offset cut centroid was not close enough to the child centerline"
+
+    later_candidates = [
+        candidate
+        for candidate in candidates
+        if _candidate_is_valid_surface_cut(candidate)
+        and _candidate_offset(candidate) > ZERO_OFFSET_TOLERANCE_MM
+    ]
+    if any(
+        _safe_float(candidate.get("parent_contamination_score"), 1.0) < selected_parent - 0.05
+        for candidate in later_candidates
+    ):
+        return False, "a later candidate had substantially lower parent contamination"
+    if any(
+        _safe_float(candidate.get("stability_score"), 0.0) > selected_stability + 0.07
+        for candidate in later_candidates
+    ):
+        return False, "a later candidate had substantially higher stability"
+    if reference_stability > selected_stability + 0.05:
+        return False, "distal stable reference was stronger than the topology-origin cut"
+    return True, ""
+
+
+def _classify_branch_start_candidates(
+    candidates: list[dict[str, Any]],
+    reference_candidate: Optional[dict[str, Any]],
+    reference_radius: Optional[float],
+    selected_candidate: Optional[dict[str, Any]],
+    *,
+    reference_relaxed: bool,
+) -> None:
+    selected_offset = _candidate_offset(selected_candidate) if selected_candidate is not None else float("inf")
+    reference_offset = _candidate_offset(reference_candidate) if reference_candidate is not None else float("inf")
+    for candidate in sorted(candidates, key=lambda item: (_candidate_offset(item), str(item.get("search_pass", "")))):
+        if not _candidate_is_valid_surface_cut(candidate):
             candidate["accepted"] = False
             if not str(candidate.get("classification", "")).startswith("invalid_"):
                 candidate["classification"] = "invalid_no_clean_component"
             candidate["rejection_reason"] = candidate.get("rejection_reason") or "no cut-based radius could be measured"
             continue
 
-        radius = _safe_float(candidate.get("equivalent_radius_mm"), float("nan"))
-        parent_score = _safe_float(candidate.get("parent_contamination_score"), 1.0)
-        spread = _safe_float(candidate.get("radius_spread_mm"), float("inf"))
-        centroid_distance = _safe_float(candidate.get("centroid_distance_to_centerline_mm"), float("inf"))
-        radial_cv = _safe_float(candidate.get("_radial_cv"), float("inf"))
-        offset = _safe_float(candidate.get("offset_mm"), 0.0)
-
-        too_large_relative = bool(reference_radius is not None and reference_radius > EPS and radius > 1.85 * reference_radius)
-        too_spread = spread > max(1.35 * radius, 0.75)
-        too_far = centroid_distance > max(1.25 * radius, 0.75)
-        too_irregular = radial_cv > 0.50 or parent_score >= 0.72
-
-        if too_large_relative or too_spread or too_far or too_irregular:
-            candidate["classification"] = "too_proximal_parent_contaminated"
+        if reference_candidate is None or reference_radius is None:
             candidate["accepted"] = False
-            reasons: list[str] = []
-            if too_large_relative:
-                reasons.append("cut radius is much larger than later stable branch sections")
-            if too_spread:
-                reasons.append("cut component is too spread for a compact daughter section")
-            if too_far:
-                reasons.append("cut component centroid is too far from the child centerline")
-            if too_irregular:
-                reasons.append("cut component is irregular or parent-wall contaminated")
-            candidate["rejection_reason"] = "; ".join(reasons)
+            candidate["classification"] = "ambiguous_surface_cut_requires_review"
+            candidate["rejection_reason"] = "no distal stable daughter reference could be established"
             continue
 
-        if not _is_candidate_basically_tubular(candidate, reference_radius):
-            candidate["classification"] = "too_proximal_parent_contaminated"
-            candidate["accepted"] = False
-            candidate["rejection_reason"] = "surface cut did not satisfy compact daughter-tube criteria"
-            continue
-
-        if first_stable_offset is not None and offset > first_stable_offset + (0.5 * BRANCH_RING_SEARCH_STEP_MM):
-            candidate["classification"] = "too_distal_after_stable_section"
-            candidate["accepted"] = False
-            candidate["rejection_reason"] = "an earlier stable child-tube section was already available"
-            continue
-
-        candidate["classification"] = "stable_child_tube"
-        candidate["accepted"] = True
-        candidate["rejection_reason"] = ""
-        if first_stable_offset is None:
-            first_stable_offset = offset
-            first_stable_score = _safe_float(candidate.get("stability_score"), 0.0)
-        elif _safe_float(candidate.get("stability_score"), 0.0) < first_stable_score - 0.05:
-            candidate["classification"] = "too_distal_after_stable_section"
-            candidate["accepted"] = False
-            candidate["rejection_reason"] = "later candidate did not improve stability over the first stable section"
-
-
-def _candidate_metrics_for_json(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    keep = [
-        "offset_mm",
-        "classification",
-        "equivalent_radius_mm",
-        "centroid_distance_to_centerline_mm",
-        "radius_spread_mm",
-        "cut_point_count",
-        "cut_component_count",
-        "selected_component_point_count",
-        "selected_component_area_estimate",
-        "selected_component_equivalent_radius_mm",
-        "selected_component_max_radius_mm",
-        "selected_component_min_radius_mm",
-        "compactness_score",
-        "parent_contamination_score",
-        "stability_score",
-        "accepted",
-        "rejection_reason",
-        "search_pass",
-    ]
-    compact: list[dict[str, Any]] = []
-    for candidate in sorted(candidates, key=lambda item: (float(item.get("offset_mm", 0.0)), str(item.get("search_pass", "")))):
-        item: dict[str, Any] = {}
-        for key in keep:
-            value = candidate.get(key)
-            if isinstance(value, float):
-                item[key] = round(value, 6) if math.isfinite(value) else None
+        reasons = _candidate_clean_rejection_reasons(
+            candidate,
+            reference_radius,
+            reference_candidate,
+            relaxed=reference_relaxed,
+        )
+        is_selected = candidate is selected_candidate
+        if not reasons:
+            offset = _candidate_offset(candidate)
+            if offset < selected_offset - 1.0e-6:
+                candidate["classification"] = "too_proximal_parent_contaminated"
+                candidate["accepted"] = False
+                candidate["rejection_reason"] = "candidate lies proximal to the selected last clean daughter boundary"
+            elif offset <= selected_offset + 1.0e-6 or is_selected:
+                candidate["classification"] = "stable_child_tube"
+                candidate["accepted"] = True
+                candidate["rejection_reason"] = ""
             else:
-                item[key] = value
-        compact.append(item)
-    return compact
+                candidate["classification"] = "too_distal_after_stable_section"
+                candidate["accepted"] = False
+                candidate["rejection_reason"] = "an earlier clean daughter-tube boundary was selected after reference-first refinement"
+            continue
+
+        candidate["accepted"] = False
+        if _candidate_offset(candidate) <= max(selected_offset, reference_offset) + 1.0e-6:
+            candidate["classification"] = "too_proximal_parent_contaminated"
+        else:
+            candidate["classification"] = "unstable_surface_cut_requires_review"
+        candidate["rejection_reason"] = "; ".join(reasons)
+
+    if (
+        reference_candidate is not None
+        and reference_radius is not None
+        and selected_candidate is not None
+        and _candidate_is_valid_surface_cut(selected_candidate)
+    ):
+        selected_candidate["classification"] = "stable_child_tube"
+        selected_candidate["accepted"] = True
+        selected_candidate["rejection_reason"] = ""
+
+
+def _candidate_summary(
+    candidates: list[dict[str, Any]],
+    selected_candidate: Optional[dict[str, Any]],
+    reference_candidate: Optional[dict[str, Any]],
+    reference_radius: Optional[float],
+    *,
+    fallback_used: bool,
+    zero_offset_proof_passed: bool,
+    zero_offset_success_forbidden_reason: str,
+    selected_reason: str,
+) -> dict[str, Any]:
+    stable_offsets = [
+        _candidate_offset(candidate)
+        for candidate in candidates
+        if candidate.get("classification") == "stable_child_tube"
+    ]
+    valid_candidates = [candidate for candidate in candidates if _candidate_is_valid_surface_cut(candidate)]
+    best_stability = max(valid_candidates, key=lambda item: _safe_float(item.get("stability_score"), 0.0), default=None)
+    lowest_parent = min(
+        valid_candidates,
+        key=lambda item: _safe_float(item.get("parent_contamination_score"), 1.0),
+        default=None,
+    )
+    selected_offset = _candidate_offset(selected_candidate) if selected_candidate is not None else 0.0
+    return {
+        "first_stable_offset_mm": _round_float(min(stable_offsets), 6) if stable_offsets else None,
+        "selected_offset_mm": _round_float(selected_offset, 6),
+        "reference_offset_mm": _round_float(_candidate_offset(reference_candidate), 6) if reference_candidate is not None else None,
+        "reference_radius_mm": _round_float(reference_radius, 6),
+        "best_stability_offset_mm": _round_float(_candidate_offset(best_stability), 6) if best_stability is not None else None,
+        "lowest_contamination_offset_mm": _round_float(_candidate_offset(lowest_parent), 6) if lowest_parent is not None else None,
+        "rejected_too_proximal_count": int(
+            sum(1 for candidate in candidates if candidate.get("classification") == "too_proximal_parent_contaminated")
+        ),
+        "invalid_cut_count": int(
+            sum(1 for candidate in candidates if str(candidate.get("classification", "")).startswith("invalid_"))
+        ),
+        "fallback_used": bool(fallback_used),
+        "zero_offset_selected": bool(selected_offset <= ZERO_OFFSET_TOLERANCE_MM),
+        "zero_offset_proof_passed": bool(zero_offset_proof_passed),
+        "zero_offset_success_forbidden_reason": str(zero_offset_success_forbidden_reason),
+        "selected_reason": str(selected_reason),
+    }
 
 
 def _surface_validated_branch_start_ring_v1(
@@ -1096,17 +1390,19 @@ def _surface_validated_branch_start_ring_v1(
         _surface_cut_candidate_metrics(surface, segment, offset, "forward_search")
         for offset in search_offsets
     ]
-    _classify_branch_start_candidates(candidates)
 
+    reference_candidate, reference_radius, _, reference_relaxed = _find_stable_daughter_reference(candidates)
     backward_refinement_used = False
-    stable_candidates = [candidate for candidate in candidates if bool(candidate.get("accepted"))]
-    if stable_candidates:
-        first_stable = min(stable_candidates, key=lambda item: float(item["offset_mm"]))
-        stable_offset = float(first_stable["offset_mm"])
-        if stable_offset > BACKWARD_REFINE_STEP_MM:
-            existing_offsets = {round(float(candidate["offset_mm"]), 6) for candidate in candidates}
+    selected_candidate: Optional[dict[str, Any]] = None
+    selected_reason = ""
+    fallback_used = False
+
+    if reference_candidate is not None and reference_radius is not None:
+        reference_offset = _candidate_offset(reference_candidate)
+        if reference_offset > BACKWARD_REFINE_STEP_MM:
+            existing_offsets = {round(_candidate_offset(candidate), 6) for candidate in candidates}
             backward_offsets: list[float] = []
-            current = stable_offset - BACKWARD_REFINE_STEP_MM
+            current = reference_offset - BACKWARD_REFINE_STEP_MM
             while current >= -1.0e-9:
                 rounded = round(max(0.0, float(current)), 6)
                 if rounded not in existing_offsets:
@@ -1119,33 +1415,69 @@ def _surface_validated_branch_start_ring_v1(
                     _surface_cut_candidate_metrics(surface, segment, offset, "backward_refinement")
                     for offset in backward_offsets
                 )
-                _classify_branch_start_candidates(candidates)
 
-    stable_candidates = [candidate for candidate in candidates if bool(candidate.get("accepted"))]
-    selected_candidate: Optional[dict[str, Any]] = None
-    if stable_candidates:
-        selected_candidate = min(stable_candidates, key=lambda item: float(item["offset_mm"]))
+        candidate_by_offset = _best_candidate_by_offset(candidates)
+        selected_candidate = reference_candidate
+        selected_reason = "distal stable daughter reference selected"
+        for offset in sorted(
+            [value for value in candidate_by_offset if value < reference_offset - 1.0e-6],
+            reverse=True,
+        ):
+            candidate = candidate_by_offset[offset]
+            if _candidate_clean_against_reference(
+                candidate,
+                reference_radius,
+                reference_candidate,
+                relaxed=reference_relaxed,
+            ):
+                selected_candidate = candidate
+                selected_reason = "most proximal clean candidate before parent contamination"
+                continue
+            selected_reason = "last clean candidate before proximal parent contamination"
+            break
+
+    if selected_candidate is None:
+        fallback_used = True
+        selected_candidate = _choose_fallback_surface_candidate(candidates)
+        reference_candidate = None
+        reference_radius = None
+        selected_reason = "fallback surface candidate requires review" if selected_candidate is not None else "topology fallback requires review"
+
+    _classify_branch_start_candidates(
+        candidates,
+        reference_candidate,
+        reference_radius,
+        selected_candidate,
+        reference_relaxed=reference_relaxed,
+    )
 
     if selected_candidate is None:
         sample_center = _segment_point_after(segment, min(1.0, max(0.0, branch_length * 0.20)))
         radius, _, _, confidence = _estimate_radius_from_surface(surface, surface_locator, sample_center)
+        zero_forbidden_reason = "no distal stable daughter reference was available"
         metadata = {
             "selection_algorithm": BRANCH_START_RING_ALGORITHM,
             "topology_start_xyz": [float(value) for value in segment.points[0]],
             "selected_offset_mm": 0.0,
             "search_max_mm": float(search_max),
-            "search_step_mm": BRANCH_RING_SEARCH_STEP_MM,
             "candidate_count": int(len(candidates)),
             "accepted_candidate_count": 0,
-            "selected_candidate_index": None,
             "selected_candidate_classification": "topology_fallback_requires_review",
             "selected_radius_rule": "estimated_fallback_requires_review",
             "surface_cut_used": False,
             "backward_refinement_used": bool(backward_refinement_used),
             "cells_reassigned_to_parent_count": 0,
-            "cells_retained_in_child_count": 0,
-            "ring_assignment_consistency_status": "not_evaluated",
-            "candidate_metrics": _candidate_metrics_for_json(candidates),
+            "surface_assignment_adjusted": False,
+            "candidate_summary": _candidate_summary(
+                candidates,
+                None,
+                reference_candidate,
+                reference_radius,
+                fallback_used=True,
+                zero_offset_proof_passed=False,
+                zero_offset_success_forbidden_reason=zero_forbidden_reason,
+                selected_reason=selected_reason,
+            ),
         }
         return BranchStartSelection(
             center=np.asarray(segment.points[0], dtype=float),
@@ -1162,49 +1494,90 @@ def _surface_validated_branch_start_ring_v1(
         )
 
     candidates_sorted = sorted(candidates, key=lambda item: (float(item.get("offset_mm", 0.0)), str(item.get("search_pass", ""))))
-    selected_index = next(
-        (
-            idx
-            for idx, candidate in enumerate(candidates_sorted)
-            if candidate is selected_candidate
-        ),
-        None,
-    )
-    selected_offset = float(selected_candidate["offset_mm"])
-    selected_radius = float(selected_candidate["equivalent_radius_mm"])
+    selected_offset = _candidate_offset(selected_candidate)
+    selected_radius = _candidate_radius(selected_candidate)
     parent_contamination_detected = any(
-        candidate.get("classification") == "too_proximal_parent_contaminated" for candidate in candidates
+        candidate.get("classification") == "too_proximal_parent_contaminated"
+        for candidate in candidates
+        if _candidate_offset(candidate) <= selected_offset + BRANCH_RING_SEARCH_STEP_MM
     )
     selected_stability = _safe_float(selected_candidate.get("stability_score"), 0.0)
-    confidence = 0.86 + 0.08 * min(1.0, selected_stability)
-    if selected_offset <= EPS:
+    selected_compactness = _safe_float(selected_candidate.get("compactness_score"), 0.0)
+    selected_parent = _safe_float(selected_candidate.get("parent_contamination_score"), 1.0)
+    zero_proof_passed, zero_forbidden_reason = _zero_offset_proof(
+        candidates,
+        selected_candidate,
+        reference_candidate,
+        reference_radius,
+    )
+    confidence = 0.70 + 0.12 * min(1.0, selected_stability) + 0.10 * min(1.0, selected_compactness)
+    confidence -= 0.20 * min(1.0, selected_parent)
+    if reference_relaxed:
+        confidence = min(confidence, 0.76)
+    if not backward_refinement_used:
         confidence = min(confidence, 0.78)
-    if parent_contamination_detected and selected_offset > EPS:
-        confidence = min(confidence, 0.88)
-    status = STATUS_SUCCESS if confidence >= 0.70 else STATUS_REQUIRES_REVIEW
+    if parent_contamination_detected:
+        confidence = min(confidence, 0.84)
+    if fallback_used:
+        confidence = min(confidence, 0.58 if selected_offset <= ZERO_OFFSET_TOLERANCE_MM else 0.62)
+    if selected_parent >= MAX_SUCCESS_PARENT_CONTAMINATION:
+        confidence = min(confidence, 0.64)
+    if selected_offset <= ZERO_OFFSET_TOLERANCE_MM and not zero_proof_passed:
+        confidence = min(confidence, 0.62)
+    elif selected_offset <= ZERO_OFFSET_TOLERANCE_MM:
+        confidence = min(confidence, 0.86)
+
+    status = STATUS_SUCCESS
+    if fallback_used or reference_relaxed or selected_parent >= MAX_SUCCESS_PARENT_CONTAMINATION:
+        status = STATUS_REQUIRES_REVIEW
+    if selected_offset <= ZERO_OFFSET_TOLERANCE_MM and not zero_proof_passed:
+        status = STATUS_REQUIRES_REVIEW
+    if selected_candidate is reference_candidate and selected_offset > max(0.5, BRANCH_RING_SEARCH_STEP_MM):
+        status = STATUS_REQUIRES_REVIEW
+        confidence = min(confidence, 0.72)
+
     warnings: list[str] = []
-    if selected_offset <= EPS:
-        warnings.append("surface-cut search accepted the topology origin; this was validated but remains visually reviewable")
+    if fallback_used:
+        warnings.append("branch_start used the best available surface-cut candidate because no stable daughter reference was proven")
+    if selected_offset <= ZERO_OFFSET_TOLERANCE_MM and not zero_proof_passed:
+        warnings.append("zero-offset branch_start was not accepted as proven clean daughter boundary")
     if parent_contamination_detected:
         warnings.append("proximal parent-wall contamination was detected and rejected before selecting this branch_start ring")
+    if reference_relaxed:
+        warnings.append("branch_start stable daughter reference was weak and requires visual review")
+    if selected_parent >= MAX_SUCCESS_PARENT_CONTAMINATION:
+        warnings.append("selected branch_start candidate has parent contamination above the success threshold")
+    if selected_candidate is reference_candidate and selected_offset > max(0.5, BRANCH_RING_SEARCH_STEP_MM):
+        warnings.append("backward refinement stopped at the distal stable reference because proximal candidates were contaminated")
+
+    if not zero_forbidden_reason and selected_offset <= ZERO_OFFSET_TOLERANCE_MM and not zero_proof_passed:
+        zero_forbidden_reason = "zero-offset branch_start was not accepted as proven clean daughter boundary"
+
+    selected_radius_rule = "surface_cut_fallback_requires_review" if fallback_used else "stable_child_tube_equivalent_radius"
 
     metadata = {
         "selection_algorithm": BRANCH_START_RING_ALGORITHM,
         "topology_start_xyz": [float(value) for value in segment.points[0]],
-        "selected_offset_mm": selected_offset,
+        "selected_offset_mm": float(selected_offset),
         "search_max_mm": float(search_max),
-        "search_step_mm": BRANCH_RING_SEARCH_STEP_MM,
         "candidate_count": int(len(candidates)),
         "accepted_candidate_count": int(sum(1 for candidate in candidates if bool(candidate.get("accepted")))),
-        "selected_candidate_index": selected_index,
         "selected_candidate_classification": str(selected_candidate.get("classification", "")),
-        "selected_radius_rule": "stable_child_tube_equivalent_radius",
+        "selected_radius_rule": selected_radius_rule,
         "surface_cut_used": True,
         "backward_refinement_used": bool(backward_refinement_used),
         "cells_reassigned_to_parent_count": 0,
-        "cells_retained_in_child_count": 0,
-        "ring_assignment_consistency_status": "not_evaluated",
-        "candidate_metrics": _candidate_metrics_for_json(candidates),
+        "surface_assignment_adjusted": False,
+        "candidate_summary": _candidate_summary(
+            candidates_sorted,
+            selected_candidate,
+            reference_candidate,
+            reference_radius,
+            fallback_used=fallback_used,
+            zero_offset_proof_passed=zero_proof_passed,
+            zero_offset_success_forbidden_reason=zero_forbidden_reason,
+            selected_reason=selected_reason,
+        ),
     }
 
     return BranchStartSelection(
@@ -1212,8 +1585,8 @@ def _surface_validated_branch_start_ring_v1(
         normal=np.asarray(selected_candidate["_normal_np"], dtype=float),
         radius_mm=selected_radius,
         source_s_mm=selected_offset,
-        radius_rule="stable_child_tube_equivalent_radius",
-        confidence=float(np.clip(confidence, 0.65, 0.95)),
+        radius_rule=selected_radius_rule,
+        confidence=float(np.clip(confidence, 0.45, 0.95)),
         status=status,
         warnings=warnings,
         metadata=metadata,
@@ -1535,6 +1908,39 @@ def _build_boundary_rings(
     return append_polydata([ring.polydata for ring in rings]), rings, bifurcations, warnings
 
 
+def _set_uniform_numeric_cell_array(polydata: vtk.vtkPolyData, name: str, value: float | int) -> None:
+    arr = polydata.GetCellData().GetArray(name)
+    if arr is None:
+        if isinstance(value, int):
+            add_int_cell_array(polydata, name, [int(value)] * polydata.GetNumberOfCells())
+        else:
+            add_float_cell_array(polydata, name, [float(value)] * polydata.GetNumberOfCells())
+        return
+    for idx in range(polydata.GetNumberOfCells()):
+        arr.SetValue(idx, value)
+
+
+def _set_uniform_string_cell_array(polydata: vtk.vtkPolyData, name: str, value: str) -> None:
+    arr = polydata.GetCellData().GetAbstractArray(name)
+    if arr is None:
+        add_string_cell_array(polydata, name, [str(value)] * polydata.GetNumberOfCells())
+        return
+    for idx in range(polydata.GetNumberOfCells()):
+        arr.SetValue(idx, str(value))
+
+
+def _sync_ring_polydata_contract_arrays(ring: BoundaryRing) -> None:
+    _set_uniform_numeric_cell_array(ring.polydata, "RingId", int(ring.ring_id))
+    _set_uniform_string_cell_array(ring.polydata, "RingLabel", ring.ring_label)
+    _set_uniform_string_cell_array(ring.polydata, "RingType", ring.ring_type)
+    _set_uniform_numeric_cell_array(ring.polydata, "ParentSegmentId", int(ring.parent_segment_id or 0))
+    _set_uniform_numeric_cell_array(ring.polydata, "ChildSegmentId", int(ring.child_segment_id or 0))
+    _set_uniform_numeric_cell_array(ring.polydata, "SegmentId", int(ring.source_segment_id))
+    _set_uniform_numeric_cell_array(ring.polydata, "RadiusMm", float(ring.radius_mm))
+    _set_uniform_numeric_cell_array(ring.polydata, "Confidence", float(ring.confidence))
+    _set_uniform_string_cell_array(ring.polydata, "Status", ring.status)
+
+
 def _assign_surface_segments(
     surface: vtk.vtkPolyData,
     segments: list[GeometrySegment],
@@ -1621,16 +2027,28 @@ def _assign_surface_segments(
             child_id = int(ring.child_segment_id or ring.source_segment_id)
             stats = assignment_stats.get(child_id, {"reassigned": 0, "retained": 0})
             ring.metadata["cells_reassigned_to_parent_count"] = int(stats["reassigned"])
-            ring.metadata["cells_retained_in_child_count"] = int(stats["retained"])
             ring.metadata["surface_assignment_adjusted"] = bool(stats["reassigned"] > 0)
-            if ring.metadata.get("selected_candidate_classification") == "topology_fallback_requires_review":
-                ring.metadata["ring_assignment_consistency_status"] = "requires_review_topology_fallback"
-            elif float(ring.source_centerline_s_mm) <= EPS:
-                ring.metadata["ring_assignment_consistency_status"] = "surface_cut_offset_zero_no_proximal_reassignment"
-            elif stats["reassigned"] > 0:
-                ring.metadata["ring_assignment_consistency_status"] = "corrected_proximal_child_cells_to_parent"
-            else:
-                ring.metadata["ring_assignment_consistency_status"] = "no_proximal_child_cells_detected"
+            summary = ring.metadata.get("candidate_summary")
+            if isinstance(summary, dict):
+                summary["surface_assignment_adjusted"] = bool(stats["reassigned"] > 0)
+                summary["cells_reassigned_to_parent_count"] = int(stats["reassigned"])
+
+            selected_s = float(max(0.0, ring.source_centerline_s_mm))
+            zero_proof_passed = bool(summary.get("zero_offset_proof_passed")) if isinstance(summary, dict) else False
+            if selected_s <= ZERO_OFFSET_TOLERANCE_MM and not zero_proof_passed:
+                ring.status = STATUS_REQUIRES_REVIEW
+                ring.confidence = min(float(ring.confidence), 0.62)
+                _append_unique(
+                    ring.warnings,
+                    "zero-offset branch_start was not accepted as proven clean daughter boundary",
+                )
+            elif selected_s > ZERO_OFFSET_TOLERANCE_MM and stats["reassigned"] == 0:
+                ring.status = STATUS_REQUIRES_REVIEW
+                ring.confidence = min(float(ring.confidence), 0.68)
+                _append_unique(
+                    ring.warnings,
+                    "selected branch_start moved distally but no proximal child cells were reassigned",
+                )
 
     unassigned_cell_count = sum(1 for value in assigned_segment_ids if int(value) <= 0)
     if unassigned_cell_count:
@@ -1829,22 +2247,28 @@ def _branch_start_refinement_diagnostics(result_data: dict[str, Any]) -> dict[st
     parent_contamination_detected_count = 0
     cells_reassigned_total = 0
     rings_requiring_review: list[int] = []
+    zero_offset_selected_count = 0
+    zero_offset_success_count = 0
+    zero_offset_requires_review_count = 0
+    rings_moved_distally_count = 0
+    rings_with_surface_assignment_adjusted_count = 0
 
     for ring in branch_start_rings:
-        candidate_metrics = ring.get("candidate_metrics", [])
-        if not isinstance(candidate_metrics, list):
-            candidate_metrics = []
-        stable_found = any(
-            isinstance(candidate, dict) and candidate.get("classification") == "stable_child_tube"
-            for candidate in candidate_metrics
-        )
-        parent_contamination_found = any(
-            isinstance(candidate, dict) and candidate.get("classification") == "too_proximal_parent_contaminated"
-            for candidate in candidate_metrics
+        candidate_summary = ring.get("candidate_summary", {})
+        if not isinstance(candidate_summary, dict):
+            candidate_summary = {}
+        selected_offset = _safe_float(ring.get("selected_offset_mm", ring.get("source_centerline_s_mm")), 0.0)
+        zero_offset_selected = bool(selected_offset <= ZERO_OFFSET_TOLERANCE_MM)
+        zero_offset_proof_passed = bool(candidate_summary.get("zero_offset_proof_passed", False))
+        fallback_used = bool(candidate_summary.get("fallback_used", False))
+        stable_found = candidate_summary.get("reference_offset_mm") is not None or candidate_summary.get("first_stable_offset_mm") is not None
+        parent_contamination_found = int(_safe_float(candidate_summary.get("rejected_too_proximal_count"), 0.0)) > 0
+        parent_contamination_found = parent_contamination_found or any(
+            "contamination" in str(warning).lower() for warning in ring.get("warnings", []) if isinstance(warning, str)
         )
         if ring.get("surface_cut_used") is True:
             refined_ring_count += 1
-        if ring.get("selected_candidate_classification") == "topology_fallback_requires_review":
+        if ring.get("selected_candidate_classification") == "topology_fallback_requires_review" or fallback_used:
             topology_fallback_ring_count += 1
         if stable_found:
             stable_candidate_found_count += 1
@@ -1859,6 +2283,16 @@ def _branch_start_refinement_diagnostics(result_data: dict[str, Any]) -> dict[st
         segment_id = int(_safe_float(ring.get("child_segment_id") or ring.get("source_segment_id"), 0.0))
         cells_reassigned = int(_safe_float(ring.get("cells_reassigned_to_parent_count"), 0.0))
         cells_reassigned_total += cells_reassigned
+        if zero_offset_selected:
+            zero_offset_selected_count += 1
+            if ring.get("status") == STATUS_SUCCESS:
+                zero_offset_success_count += 1
+            if ring.get("status") == STATUS_REQUIRES_REVIEW:
+                zero_offset_requires_review_count += 1
+        if selected_offset > ZERO_OFFSET_TOLERANCE_MM:
+            rings_moved_distally_count += 1
+        if bool(ring.get("surface_assignment_adjusted", False)):
+            rings_with_surface_assignment_adjusted_count += 1
         warnings = ring.get("warnings", [])
         warning_count = len(warnings) if isinstance(warnings, list) else 0
         per_ring_summary.append(
@@ -1873,6 +2307,11 @@ def _branch_start_refinement_diagnostics(result_data: dict[str, Any]) -> dict[st
                 "candidate_count": int(_safe_float(ring.get("candidate_count"), 0.0)),
                 "warning_count": int(warning_count),
                 "cells_reassigned_to_parent_count": int(cells_reassigned),
+                "first_stable_offset_mm": candidate_summary.get("first_stable_offset_mm"),
+                "reference_offset_mm": candidate_summary.get("reference_offset_mm"),
+                "zero_offset_selected": bool(zero_offset_selected),
+                "zero_offset_proof_passed": bool(zero_offset_proof_passed),
+                "fallback_used": bool(fallback_used),
             }
         )
 
@@ -1884,6 +2323,11 @@ def _branch_start_refinement_diagnostics(result_data: dict[str, Any]) -> dict[st
         "stable_candidate_found_count": int(stable_candidate_found_count),
         "parent_contamination_detected_count": int(parent_contamination_detected_count),
         "cells_reassigned_to_parent_total": int(cells_reassigned_total),
+        "zero_offset_selected_count": int(zero_offset_selected_count),
+        "zero_offset_success_count": int(zero_offset_success_count),
+        "zero_offset_requires_review_count": int(zero_offset_requires_review_count),
+        "rings_moved_distally_count": int(rings_moved_distally_count),
+        "rings_with_surface_assignment_adjusted_count": int(rings_with_surface_assignment_adjusted_count),
         "rings_requiring_review": rings_requiring_review,
         "per_ring_summary": per_ring_summary,
     }
@@ -2081,7 +2525,6 @@ def _build_segmentation_diagnostics(
 
     return {
         "status": status,
-        "dependencies": _dependency_diagnostics(),
         "outputs_exist": outputs_exist,
         "vtp_arrays": {
             "segmented_surface_cell_arrays": segmented_surface_arrays,
@@ -2089,41 +2532,11 @@ def _build_segmentation_diagnostics(
             "missing_segmented_surface_arrays": missing_segmented_surface_arrays,
             "missing_boundary_ring_arrays": missing_boundary_ring_arrays,
         },
-        "json": {
-            "top_level_keys": sorted(result_data.keys()),
-            "missing_top_level_keys": missing_result_keys,
-        },
         "labels": {
             "segment_labels": sorted(set([*segment_labels_from_vtp, *json_segment_labels])),
             "ring_labels": sorted(set([*ring_labels_from_vtp, *json_ring_labels])),
             "bifurcation_labels": json_bifurcation_labels,
             "forbidden_labels_found": forbidden_labels_found,
-        },
-        "segments": {
-            "segment_count": int(len(segments_json)),
-            "branch_count": int(len(branch_segments)),
-            "aortic_body_count": int(
-                sum(
-                    1
-                    for segment in segments_json
-                    if isinstance(segment, dict) and segment.get("segment_label") == "aortic_body"
-                )
-            ),
-            "segments_missing_proximal_ring": segments_missing_proximal_ring,
-        },
-        "rings": {
-            "ring_count": int(len(rings_json)),
-            "ring_types": _ring_type_counts([ring for ring in rings_json if isinstance(ring, dict)]),
-            "requires_review_ring_count": int(requires_review_ring_count),
-            "failed_ring_count": int(failed_ring_count),
-            "low_confidence_ring_count": int(low_confidence_ring_count),
-            "missing_branch_start_ring_count": int(len(missing_branch_start_ring_ids)),
-            "missing_branch_start_segment_ids": missing_branch_start_ring_ids,
-        },
-        "bifurcations": {
-            "bifurcation_count": int(len(bifurcations_json)),
-            "bifurcations_missing_parent_ring": bifurcations_missing_parent_ring,
-            "bifurcations_missing_daughter_rings": bifurcations_missing_daughter_rings,
         },
         "branch_start_refinement": _branch_start_refinement_diagnostics(result_data),
         "warnings": warnings,
@@ -2154,7 +2567,6 @@ def run_geometry_segmentation(
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     output_paths = build_workspace_paths(project_root)
-    dependencies = _dependency_diagnostics()
 
     _require_paths([surface_path, centerline_network_path, centerline_metadata_path, input_roles_path])
 
@@ -2184,6 +2596,9 @@ def run_geometry_segmentation(
     segmented_surface, unassigned_cell_count, assignment_warnings = _assign_surface_segments(
         surface, segments, roles, rings
     )
+    for ring in rings:
+        _sync_ring_polydata_contract_arrays(ring)
+    boundary_rings = append_polydata([ring.polydata for ring in rings])
 
     segmented_surface_path = output_dir / output_paths.segmented_surface_vtp.name
     boundary_rings_path = output_dir / output_paths.boundary_rings_vtp.name
@@ -2210,7 +2625,6 @@ def run_geometry_segmentation(
 
     result = {
         "status": status,
-        "dependencies": dependencies,
         "inputs": {
             "surface": _relative_path(surface_path, project_root),
             "centerline_network": _relative_path(centerline_network_path, project_root),
@@ -2262,7 +2676,6 @@ def _failed_result(
 ) -> dict[str, Any]:
     result = {
         "status": STATUS_FAILED,
-        "dependencies": _dependency_diagnostics(),
         "inputs": {},
         "outputs": {},
         "segments": [],
