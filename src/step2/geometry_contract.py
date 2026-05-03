@@ -15,6 +15,7 @@ from src.common.geometry import (
     EPS,
     concatenate_polylines,
     cumulative_arclength,
+    orthonormal_frame,
     point_at_arclength,
     polyline_length,
     tangent_at_arclength,
@@ -87,6 +88,14 @@ FORBIDDEN_LABEL_FRAGMENTS = [
     "abdominal_aorta_trunk",
     "aorta_trunk",
 ]
+
+BRANCH_START_RING_ALGORITHM = "surface_validated_branch_start_ring_v1"
+BRANCH_RING_SEARCH_START_MM = 0.0
+BRANCH_RING_SEARCH_MAX_MM = 8.0
+BRANCH_RING_SEARCH_FRACTION = 0.35
+BRANCH_RING_SEARCH_STEP_MM = 0.25
+BACKWARD_REFINE_STEP_MM = 0.10
+MIN_CUT_COMPONENT_POINTS = 8
 
 
 class GeometrySegmentationFailure(RuntimeError):
@@ -167,6 +176,7 @@ class BoundaryRing:
     status: str
     warnings: list[str]
     polydata: vtk.vtkPolyData
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -179,6 +189,19 @@ class BifurcationRecord:
     daughter_start_ring_ids: list[int]
     status: str
     warnings: list[str]
+
+
+@dataclass
+class BranchStartSelection:
+    center: np.ndarray
+    normal: np.ndarray
+    radius_mm: float
+    source_s_mm: float
+    radius_rule: str
+    confidence: float
+    status: str
+    warnings: list[str]
+    metadata: dict[str, Any]
 
 
 def _as_finite_vector(value: Any, fallback: Iterable[float]) -> np.ndarray:
@@ -626,6 +649,577 @@ def _estimate_radius_from_surface(
     return radius, "estimated", STATUS_REQUIRES_REVIEW, 0.35
 
 
+def _project_point_to_polyline_s(points: np.ndarray, point: np.ndarray) -> tuple[float, float]:
+    pts = np.asarray(points, dtype=float)
+    target = np.asarray(point, dtype=float).reshape(3)
+    if pts.shape[0] == 0:
+        return 0.0, float("inf")
+    if pts.shape[0] == 1:
+        return 0.0, float(np.linalg.norm(target - pts[0]))
+
+    arclength = cumulative_arclength(pts)
+    best_s = 0.0
+    best_distance = float("inf")
+    for idx in range(pts.shape[0] - 1):
+        a = pts[idx]
+        b = pts[idx + 1]
+        ab = b - a
+        denom = float(np.dot(ab, ab))
+        if denom <= EPS:
+            t = 0.0
+            projected = a
+        else:
+            t = float(np.clip(np.dot(target - a, ab) / denom, 0.0, 1.0))
+            projected = a + t * ab
+        distance = float(np.linalg.norm(target - projected))
+        if distance < best_distance:
+            best_distance = distance
+            best_s = float(arclength[idx] + t * np.linalg.norm(ab))
+    return best_s, best_distance
+
+
+def _plane_cut_surface(surface: vtk.vtkPolyData, center: np.ndarray, normal: np.ndarray) -> vtk.vtkPolyData:
+    plane = vtk.vtkPlane()
+    plane.SetOrigin(float(center[0]), float(center[1]), float(center[2]))
+    plane.SetNormal(float(normal[0]), float(normal[1]), float(normal[2]))
+
+    cutter = vtk.vtkCutter()
+    cutter.SetCutFunction(plane)
+    cutter.SetInputData(surface)
+    cutter.Update()
+
+    out = vtk.vtkPolyData()
+    out.DeepCopy(cutter.GetOutput())
+    return out
+
+
+def _connected_cut_components(cut: vtk.vtkPolyData) -> list[np.ndarray]:
+    points = points_to_numpy(cut)
+    point_count = int(points.shape[0])
+    if point_count == 0:
+        return []
+    if cut.GetNumberOfCells() == 0:
+        return [np.arange(point_count, dtype=int)]
+
+    parent = list(range(point_count))
+
+    def find(value: int) -> int:
+        while parent[value] != value:
+            parent[value] = parent[parent[value]]
+            value = parent[value]
+        return value
+
+    def union(left: int, right: int) -> None:
+        left_root = find(int(left))
+        right_root = find(int(right))
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    referenced: set[int] = set()
+    for cell_id in range(cut.GetNumberOfCells()):
+        cell = cut.GetCell(cell_id)
+        ids = _point_ids_for_cell(cell)
+        if not ids:
+            continue
+        referenced.update(int(value) for value in ids)
+        for idx in range(len(ids) - 1):
+            union(int(ids[idx]), int(ids[idx + 1]))
+
+    if not referenced:
+        return [np.arange(point_count, dtype=int)]
+
+    groups: dict[int, list[int]] = defaultdict(list)
+    for point_id in referenced:
+        groups[find(int(point_id))].append(int(point_id))
+
+    components = [np.asarray(sorted(values), dtype=int) for values in groups.values() if values]
+    components.sort(key=lambda item: int(item.shape[0]), reverse=True)
+    return components
+
+
+def _projected_component_area(points: np.ndarray, center: np.ndarray, normal: np.ndarray) -> tuple[float, float]:
+    pts = np.asarray(points, dtype=float)
+    if pts.shape[0] < 3:
+        return 0.0, 0.0
+
+    u, v = orthonormal_frame(normal)
+    rel = pts - np.asarray(center, dtype=float).reshape(3)
+    xy = np.column_stack([rel @ u, rel @ v])
+    centroid_xy = np.mean(xy, axis=0)
+    angles = np.arctan2(xy[:, 1] - centroid_xy[1], xy[:, 0] - centroid_xy[0])
+    order = np.argsort(angles)
+    ordered = xy[order]
+
+    x = ordered[:, 0]
+    y = ordered[:, 1]
+    area = 0.5 * abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
+    deltas = np.diff(np.vstack([ordered, ordered[0]]), axis=0)
+    perimeter = float(np.sum(np.linalg.norm(deltas, axis=1)))
+    if not math.isfinite(area):
+        area = 0.0
+    if not math.isfinite(perimeter):
+        perimeter = 0.0
+    return area, perimeter
+
+
+def _safe_float(value: Any, fallback: float = 0.0) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        return float(fallback)
+    return out if math.isfinite(out) else float(fallback)
+
+
+def _surface_cut_candidate_metrics(
+    surface: vtk.vtkPolyData,
+    segment: GeometrySegment,
+    offset_mm: float,
+    search_pass: str,
+) -> dict[str, Any]:
+    branch_length = polyline_length(segment.points)
+    center = point_at_arclength(segment.points, float(np.clip(offset_mm, 0.0, branch_length)))
+    normal = _normal_at_segment_s(segment, float(offset_mm))
+    cut = _plane_cut_surface(surface, center, normal)
+    cut_points = points_to_numpy(cut)
+    components = _connected_cut_components(cut)
+
+    candidate: dict[str, Any] = {
+        "offset_mm": float(offset_mm),
+        "center_xyz": [float(value) for value in center],
+        "normal_xyz": [float(value) for value in normal],
+        "cut_point_count": int(cut_points.shape[0]),
+        "cut_component_count": int(len(components)),
+        "selected_component_point_count": 0,
+        "selected_component_centroid_xyz": None,
+        "selected_component_area_estimate": None,
+        "selected_component_equivalent_radius_mm": None,
+        "selected_component_max_radius_mm": None,
+        "selected_component_min_radius_mm": None,
+        "equivalent_radius_mm": None,
+        "centroid_distance_to_centerline_mm": None,
+        "radius_spread_mm": None,
+        "radius_cv_or_spread": None,
+        "surface_distance_mean_mm": None,
+        "surface_distance_max_mm": None,
+        "compactness_score": 0.0,
+        "parent_contamination_score": 1.0,
+        "stability_score": 0.0,
+        "classification": "invalid_no_cut",
+        "accepted": False,
+        "rejection_reason": "plane cut produced no usable contour component",
+        "search_pass": search_pass,
+        "_center_np": center,
+        "_normal_np": normal,
+        "_radial_cv": float("inf"),
+    }
+
+    if cut_points.shape[0] == 0 or not components:
+        return candidate
+
+    component_stats: list[dict[str, Any]] = []
+    for component in components:
+        if int(component.shape[0]) < 3:
+            continue
+        pts = cut_points[component]
+        centroid = np.mean(pts, axis=0)
+        radii = np.linalg.norm(pts - centroid, axis=1)
+        finite_radii = radii[np.isfinite(radii)]
+        if finite_radii.shape[0] < 3:
+            continue
+        area, perimeter = _projected_component_area(pts, centroid, normal)
+        median_radius = float(np.median(finite_radii))
+        if area > EPS:
+            equivalent_radius = float(math.sqrt(area / math.pi))
+        else:
+            equivalent_radius = median_radius
+            area = float(math.pi * equivalent_radius * equivalent_radius)
+        max_radius = float(np.max(finite_radii))
+        min_radius = float(np.min(finite_radii))
+        radius_spread = max_radius - min_radius
+        radial_mean = float(np.mean(finite_radii))
+        radial_cv = float(np.std(finite_radii) / radial_mean) if radial_mean > EPS else float("inf")
+        circularity = 0.0
+        if perimeter > EPS and area > EPS:
+            circularity = float(np.clip(4.0 * math.pi * area / (perimeter * perimeter), 0.0, 1.0))
+        compactness = float(np.clip(circularity * max(0.0, 1.0 - min(radial_cv, 1.0)), 0.0, 1.0))
+        centroid_distance = float(np.linalg.norm(centroid - center))
+        proximity_score = centroid_distance / max(equivalent_radius, EPS)
+        score = proximity_score + (1.0 - compactness) + 0.02 * abs(int(component.shape[0]) - 96) / 96.0
+        component_stats.append(
+            {
+                "point_ids": component,
+                "point_count": int(component.shape[0]),
+                "centroid": centroid,
+                "area": float(area),
+                "equivalent_radius": equivalent_radius,
+                "max_radius": max_radius,
+                "min_radius": min_radius,
+                "radius_spread": float(radius_spread),
+                "radial_cv": radial_cv,
+                "compactness": compactness,
+                "centroid_distance": centroid_distance,
+                "score": float(score),
+            }
+        )
+
+    if not component_stats:
+        candidate["classification"] = "invalid_no_clean_component"
+        candidate["rejection_reason"] = "plane cut components were too small for circular scoring"
+        return candidate
+
+    selected = min(component_stats, key=lambda item: float(item["score"]))
+    equivalent_radius = float(selected["equivalent_radius"])
+    radius_spread = float(selected["radius_spread"])
+    centroid_distance = float(selected["centroid_distance"])
+    radial_cv = float(selected["radial_cv"])
+    compactness = float(selected["compactness"])
+
+    large_nearby_components = 0
+    for component in component_stats:
+        if int(component["point_count"]) < MIN_CUT_COMPONENT_POINTS:
+            continue
+        if float(component["equivalent_radius"]) >= 0.65 * max(equivalent_radius, EPS):
+            if float(component["centroid_distance"]) <= max(3.0 * equivalent_radius, 1.0):
+                large_nearby_components += 1
+
+    centroid_ratio = centroid_distance / max(equivalent_radius, EPS)
+    spread_ratio = radius_spread / max(equivalent_radius, EPS)
+    parent_score = 0.45 * min(1.0, centroid_ratio / 1.5)
+    parent_score += 0.35 * min(1.0, spread_ratio / 2.0)
+    parent_score += 0.20 * min(1.0, radial_cv / 0.6)
+    if large_nearby_components > 1:
+        parent_score = min(1.0, parent_score + 0.20)
+    stability = compactness
+    stability -= 0.20 * min(1.0, centroid_ratio / 1.25)
+    stability -= 0.20 * min(1.0, spread_ratio / 1.75)
+    stability -= 0.15 * min(1.0, radial_cv / 0.5)
+    stability = float(np.clip(stability, 0.0, 1.0))
+
+    candidate.update(
+        {
+            "selected_component_point_count": int(selected["point_count"]),
+            "selected_component_centroid_xyz": [float(value) for value in selected["centroid"]],
+            "selected_component_area_estimate": float(selected["area"]),
+            "selected_component_equivalent_radius_mm": equivalent_radius,
+            "selected_component_max_radius_mm": float(selected["max_radius"]),
+            "selected_component_min_radius_mm": float(selected["min_radius"]),
+            "equivalent_radius_mm": equivalent_radius,
+            "centroid_distance_to_centerline_mm": centroid_distance,
+            "radius_spread_mm": radius_spread,
+            "radius_cv_or_spread": radial_cv,
+            "surface_distance_mean_mm": 0.0,
+            "surface_distance_max_mm": 0.0,
+            "compactness_score": compactness,
+            "parent_contamination_score": float(np.clip(parent_score, 0.0, 1.0)),
+            "stability_score": stability,
+            "classification": "candidate_surface_cut_evaluated",
+            "rejection_reason": "",
+            "_radial_cv": radial_cv,
+        }
+    )
+    return candidate
+
+
+def _candidate_offsets(branch_length: float) -> tuple[list[float], float]:
+    length = max(0.0, float(branch_length))
+    if length <= EPS:
+        return [0.0], 0.0
+
+    max_search = min(BRANCH_RING_SEARCH_MAX_MM, BRANCH_RING_SEARCH_FRACTION * length, length)
+    if max_search <= EPS:
+        return [0.0], 0.0
+
+    offsets: list[float] = []
+    current = BRANCH_RING_SEARCH_START_MM
+    while current <= max_search + 1.0e-9:
+        offsets.append(round(float(current), 6))
+        current += BRANCH_RING_SEARCH_STEP_MM
+
+    if offsets[-1] < max_search - 1.0e-6:
+        offsets.append(round(float(max_search), 6))
+    if len(offsets) == 1 and max_search > EPS:
+        offsets.append(round(float(max_search), 6))
+
+    return sorted(set(offsets)), float(max_search)
+
+
+def _is_candidate_basically_tubular(candidate: dict[str, Any], reference_radius: Optional[float]) -> bool:
+    radius = candidate.get("equivalent_radius_mm")
+    if radius is None:
+        return False
+    radius_f = _safe_float(radius, float("nan"))
+    if not math.isfinite(radius_f) or radius_f <= 0.05:
+        return False
+    if int(candidate.get("selected_component_point_count") or 0) < MIN_CUT_COMPONENT_POINTS:
+        return False
+
+    centroid_distance = _safe_float(candidate.get("centroid_distance_to_centerline_mm"), float("inf"))
+    spread = _safe_float(candidate.get("radius_spread_mm"), float("inf"))
+    radial_cv = _safe_float(candidate.get("_radial_cv"), float("inf"))
+    compactness = _safe_float(candidate.get("compactness_score"), 0.0)
+
+    if centroid_distance > max(1.25 * radius_f, 0.75):
+        return False
+    if spread > max(1.35 * radius_f, 0.75):
+        return False
+    if radial_cv > 0.50:
+        return False
+    if compactness < 0.08:
+        return False
+    if reference_radius is not None and reference_radius > EPS and radius_f > 1.85 * reference_radius:
+        return False
+    return True
+
+
+def _classify_branch_start_candidates(candidates: list[dict[str, Any]]) -> None:
+    valid_radii: list[float] = []
+    for candidate in candidates:
+        radius = candidate.get("equivalent_radius_mm")
+        radius_f = _safe_float(radius, float("nan"))
+        if not math.isfinite(radius_f) or radius_f <= 0.05:
+            continue
+        if int(candidate.get("selected_component_point_count") or 0) < MIN_CUT_COMPONENT_POINTS:
+            continue
+        if _safe_float(candidate.get("compactness_score"), 0.0) <= 0.0:
+            continue
+        valid_radii.append(radius_f)
+
+    reference_radius: Optional[float] = None
+    if valid_radii:
+        sorted_radii = sorted(valid_radii)
+        lower_half = sorted_radii[: max(1, len(sorted_radii) // 2 + 1)]
+        reference_radius = float(np.median(lower_half))
+
+    first_stable_offset: Optional[float] = None
+    first_stable_score = 0.0
+    for candidate in sorted(candidates, key=lambda item: float(item.get("offset_mm", 0.0))):
+        if candidate.get("equivalent_radius_mm") is None:
+            candidate["accepted"] = False
+            if not str(candidate.get("classification", "")).startswith("invalid_"):
+                candidate["classification"] = "invalid_no_clean_component"
+            candidate["rejection_reason"] = candidate.get("rejection_reason") or "no cut-based radius could be measured"
+            continue
+
+        radius = _safe_float(candidate.get("equivalent_radius_mm"), float("nan"))
+        parent_score = _safe_float(candidate.get("parent_contamination_score"), 1.0)
+        spread = _safe_float(candidate.get("radius_spread_mm"), float("inf"))
+        centroid_distance = _safe_float(candidate.get("centroid_distance_to_centerline_mm"), float("inf"))
+        radial_cv = _safe_float(candidate.get("_radial_cv"), float("inf"))
+        offset = _safe_float(candidate.get("offset_mm"), 0.0)
+
+        too_large_relative = bool(reference_radius is not None and reference_radius > EPS and radius > 1.85 * reference_radius)
+        too_spread = spread > max(1.35 * radius, 0.75)
+        too_far = centroid_distance > max(1.25 * radius, 0.75)
+        too_irregular = radial_cv > 0.50 or parent_score >= 0.72
+
+        if too_large_relative or too_spread or too_far or too_irregular:
+            candidate["classification"] = "too_proximal_parent_contaminated"
+            candidate["accepted"] = False
+            reasons: list[str] = []
+            if too_large_relative:
+                reasons.append("cut radius is much larger than later stable branch sections")
+            if too_spread:
+                reasons.append("cut component is too spread for a compact daughter section")
+            if too_far:
+                reasons.append("cut component centroid is too far from the child centerline")
+            if too_irregular:
+                reasons.append("cut component is irregular or parent-wall contaminated")
+            candidate["rejection_reason"] = "; ".join(reasons)
+            continue
+
+        if not _is_candidate_basically_tubular(candidate, reference_radius):
+            candidate["classification"] = "too_proximal_parent_contaminated"
+            candidate["accepted"] = False
+            candidate["rejection_reason"] = "surface cut did not satisfy compact daughter-tube criteria"
+            continue
+
+        if first_stable_offset is not None and offset > first_stable_offset + (0.5 * BRANCH_RING_SEARCH_STEP_MM):
+            candidate["classification"] = "too_distal_after_stable_section"
+            candidate["accepted"] = False
+            candidate["rejection_reason"] = "an earlier stable child-tube section was already available"
+            continue
+
+        candidate["classification"] = "stable_child_tube"
+        candidate["accepted"] = True
+        candidate["rejection_reason"] = ""
+        if first_stable_offset is None:
+            first_stable_offset = offset
+            first_stable_score = _safe_float(candidate.get("stability_score"), 0.0)
+        elif _safe_float(candidate.get("stability_score"), 0.0) < first_stable_score - 0.05:
+            candidate["classification"] = "too_distal_after_stable_section"
+            candidate["accepted"] = False
+            candidate["rejection_reason"] = "later candidate did not improve stability over the first stable section"
+
+
+def _candidate_metrics_for_json(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    keep = [
+        "offset_mm",
+        "classification",
+        "equivalent_radius_mm",
+        "centroid_distance_to_centerline_mm",
+        "radius_spread_mm",
+        "cut_point_count",
+        "cut_component_count",
+        "selected_component_point_count",
+        "selected_component_area_estimate",
+        "selected_component_equivalent_radius_mm",
+        "selected_component_max_radius_mm",
+        "selected_component_min_radius_mm",
+        "compactness_score",
+        "parent_contamination_score",
+        "stability_score",
+        "accepted",
+        "rejection_reason",
+        "search_pass",
+    ]
+    compact: list[dict[str, Any]] = []
+    for candidate in sorted(candidates, key=lambda item: (float(item.get("offset_mm", 0.0)), str(item.get("search_pass", "")))):
+        item: dict[str, Any] = {}
+        for key in keep:
+            value = candidate.get(key)
+            if isinstance(value, float):
+                item[key] = round(value, 6) if math.isfinite(value) else None
+            else:
+                item[key] = value
+        compact.append(item)
+    return compact
+
+
+def _surface_validated_branch_start_ring_v1(
+    surface: vtk.vtkPolyData,
+    surface_locator: vtk.vtkStaticPointLocator,
+    segment: GeometrySegment,
+) -> BranchStartSelection:
+    branch_length = polyline_length(segment.points)
+    search_offsets, search_max = _candidate_offsets(branch_length)
+    candidates = [
+        _surface_cut_candidate_metrics(surface, segment, offset, "forward_search")
+        for offset in search_offsets
+    ]
+    _classify_branch_start_candidates(candidates)
+
+    backward_refinement_used = False
+    stable_candidates = [candidate for candidate in candidates if bool(candidate.get("accepted"))]
+    if stable_candidates:
+        first_stable = min(stable_candidates, key=lambda item: float(item["offset_mm"]))
+        stable_offset = float(first_stable["offset_mm"])
+        if stable_offset > BACKWARD_REFINE_STEP_MM:
+            existing_offsets = {round(float(candidate["offset_mm"]), 6) for candidate in candidates}
+            backward_offsets: list[float] = []
+            current = stable_offset - BACKWARD_REFINE_STEP_MM
+            while current >= -1.0e-9:
+                rounded = round(max(0.0, float(current)), 6)
+                if rounded not in existing_offsets:
+                    backward_offsets.append(rounded)
+                    existing_offsets.add(rounded)
+                current -= BACKWARD_REFINE_STEP_MM
+            if backward_offsets:
+                backward_refinement_used = True
+                candidates.extend(
+                    _surface_cut_candidate_metrics(surface, segment, offset, "backward_refinement")
+                    for offset in backward_offsets
+                )
+                _classify_branch_start_candidates(candidates)
+
+    stable_candidates = [candidate for candidate in candidates if bool(candidate.get("accepted"))]
+    selected_candidate: Optional[dict[str, Any]] = None
+    if stable_candidates:
+        selected_candidate = min(stable_candidates, key=lambda item: float(item["offset_mm"]))
+
+    if selected_candidate is None:
+        sample_center = _segment_point_after(segment, min(1.0, max(0.0, branch_length * 0.20)))
+        radius, _, _, confidence = _estimate_radius_from_surface(surface, surface_locator, sample_center)
+        metadata = {
+            "selection_algorithm": BRANCH_START_RING_ALGORITHM,
+            "topology_start_xyz": [float(value) for value in segment.points[0]],
+            "selected_offset_mm": 0.0,
+            "search_max_mm": float(search_max),
+            "search_step_mm": BRANCH_RING_SEARCH_STEP_MM,
+            "candidate_count": int(len(candidates)),
+            "accepted_candidate_count": 0,
+            "selected_candidate_index": None,
+            "selected_candidate_classification": "topology_fallback_requires_review",
+            "selected_radius_rule": "estimated_fallback_requires_review",
+            "surface_cut_used": False,
+            "backward_refinement_used": bool(backward_refinement_used),
+            "cells_reassigned_to_parent_count": 0,
+            "cells_retained_in_child_count": 0,
+            "ring_assignment_consistency_status": "not_evaluated",
+            "candidate_metrics": _candidate_metrics_for_json(candidates),
+        }
+        return BranchStartSelection(
+            center=np.asarray(segment.points[0], dtype=float),
+            normal=_normal_at_segment_s(segment, 0.0),
+            radius_mm=float(radius),
+            source_s_mm=0.0,
+            radius_rule="estimated_fallback_requires_review",
+            confidence=min(float(confidence), 0.55),
+            status=STATUS_REQUIRES_REVIEW,
+            warnings=[
+                "branch_start ring used topology fallback because no stable surface-cut candidate was accepted"
+            ],
+            metadata=metadata,
+        )
+
+    candidates_sorted = sorted(candidates, key=lambda item: (float(item.get("offset_mm", 0.0)), str(item.get("search_pass", ""))))
+    selected_index = next(
+        (
+            idx
+            for idx, candidate in enumerate(candidates_sorted)
+            if candidate is selected_candidate
+        ),
+        None,
+    )
+    selected_offset = float(selected_candidate["offset_mm"])
+    selected_radius = float(selected_candidate["equivalent_radius_mm"])
+    parent_contamination_detected = any(
+        candidate.get("classification") == "too_proximal_parent_contaminated" for candidate in candidates
+    )
+    selected_stability = _safe_float(selected_candidate.get("stability_score"), 0.0)
+    confidence = 0.86 + 0.08 * min(1.0, selected_stability)
+    if selected_offset <= EPS:
+        confidence = min(confidence, 0.78)
+    if parent_contamination_detected and selected_offset > EPS:
+        confidence = min(confidence, 0.88)
+    status = STATUS_SUCCESS if confidence >= 0.70 else STATUS_REQUIRES_REVIEW
+    warnings: list[str] = []
+    if selected_offset <= EPS:
+        warnings.append("surface-cut search accepted the topology origin; this was validated but remains visually reviewable")
+    if parent_contamination_detected:
+        warnings.append("proximal parent-wall contamination was detected and rejected before selecting this branch_start ring")
+
+    metadata = {
+        "selection_algorithm": BRANCH_START_RING_ALGORITHM,
+        "topology_start_xyz": [float(value) for value in segment.points[0]],
+        "selected_offset_mm": selected_offset,
+        "search_max_mm": float(search_max),
+        "search_step_mm": BRANCH_RING_SEARCH_STEP_MM,
+        "candidate_count": int(len(candidates)),
+        "accepted_candidate_count": int(sum(1 for candidate in candidates if bool(candidate.get("accepted")))),
+        "selected_candidate_index": selected_index,
+        "selected_candidate_classification": str(selected_candidate.get("classification", "")),
+        "selected_radius_rule": "stable_child_tube_equivalent_radius",
+        "surface_cut_used": True,
+        "backward_refinement_used": bool(backward_refinement_used),
+        "cells_reassigned_to_parent_count": 0,
+        "cells_retained_in_child_count": 0,
+        "ring_assignment_consistency_status": "not_evaluated",
+        "candidate_metrics": _candidate_metrics_for_json(candidates),
+    }
+
+    return BranchStartSelection(
+        center=np.asarray(selected_candidate["_center_np"], dtype=float),
+        normal=np.asarray(selected_candidate["_normal_np"], dtype=float),
+        radius_mm=selected_radius,
+        source_s_mm=selected_offset,
+        radius_rule="stable_child_tube_equivalent_radius",
+        confidence=float(np.clip(confidence, 0.65, 0.95)),
+        status=status,
+        warnings=warnings,
+        metadata=metadata,
+    )
+
+
 def _termination_radius(termination: Optional[dict[str, Any]]) -> tuple[Optional[float], Optional[str]]:
     if not termination:
         return None, None
@@ -677,6 +1271,7 @@ def _build_boundary_rings(
         confidence: float,
         status: str,
         ring_warnings: list[str],
+        metadata: Optional[dict[str, Any]] = None,
     ) -> int:
         ring_id = len(rings) + 1
         normal_unit = unit(normal)
@@ -731,6 +1326,7 @@ def _build_boundary_rings(
                 status=status,
                 warnings=list(ring_warnings),
                 polydata=ring_polydata,
+                metadata=dict(metadata or {}),
             )
         )
         return ring_id
@@ -792,25 +1388,28 @@ def _build_boundary_rings(
         if segment.terminal_face_id is not None:
             terminal_face_to_segment[int(segment.terminal_face_id)] = int(segment.segment_id)
 
+    branch_start_selection_by_segment_id: dict[int, BranchStartSelection] = {}
+
     for segment in segments:
         if segment.segment_type != "branch":
             continue
-        sample_center = _segment_point_after(segment, min(1.0, max(0.0, polyline_length(segment.points) * 0.20)))
-        radius, radius_rule, ring_status, confidence = _estimate_radius_from_surface(surface, surface_locator, sample_center)
+        selection = _surface_validated_branch_start_ring_v1(surface, surface_locator, segment)
+        branch_start_selection_by_segment_id[int(segment.segment_id)] = selection
         segment.proximal_ring_id = add_ring(
             "branch_start",
-            segment.points[0],
-            _normal_at_segment_s(segment, 0.0),
-            radius,
+            selection.center,
+            selection.normal,
+            selection.radius_mm,
             segment.segment_id,
             segment.parent_segment_id,
             segment.segment_id,
-            0.0,
+            selection.source_s_mm,
             "perpendicular_to_child_centerline_tangent",
-            radius_rule,
-            confidence,
-            ring_status,
-            ["branch_start is an approximate first-pass ring"],
+            selection.radius_rule,
+            selection.confidence,
+            selection.status,
+            selection.warnings,
+            selection.metadata,
         )
 
         if segment.terminal_face_id is not None:
@@ -890,27 +1489,29 @@ def _build_boundary_rings(
         daughter_ring_ids: list[int] = []
         for child_segment_id in sorted(child_segment_ids):
             child_segment = segment_lookup[int(child_segment_id)]
-            child_length = polyline_length(child_segment.points)
-            child_s = min(0.5, child_length * 0.20)
-            child_center = point_at_arclength(child_segment.points, child_s)
-            child_radius, child_radius_rule, child_status, child_confidence = _estimate_radius_from_surface(
-                surface, surface_locator, child_center
-            )
+            child_selection = branch_start_selection_by_segment_id.get(int(child_segment.segment_id))
+            if child_selection is None:
+                child_selection = _surface_validated_branch_start_ring_v1(surface, surface_locator, child_segment)
+                branch_start_selection_by_segment_id[int(child_segment.segment_id)] = child_selection
+            daughter_metadata = dict(child_selection.metadata)
+            daughter_metadata["selection_algorithm"] = BRANCH_START_RING_ALGORITHM
+            daughter_metadata["daughter_start_reused_branch_start_refinement"] = True
             daughter_ring_ids.append(
                 add_ring(
                     "daughter_start",
-                    child_center,
-                    _normal_at_segment_s(child_segment, child_s),
-                    child_radius,
+                    child_selection.center,
+                    child_selection.normal,
+                    child_selection.radius_mm,
                     child_segment.segment_id,
                     parent_segment_id,
                     child_segment.segment_id,
-                    child_s,
+                    child_selection.source_s_mm,
                     "perpendicular_to_daughter_centerline_tangent",
-                    child_radius_rule,
-                    min(child_confidence, 0.55),
-                    STATUS_REQUIRES_REVIEW if child_status != STATUS_FAILED else STATUS_FAILED,
-                    ["daughter_start is a first-pass ring"],
+                    child_selection.radius_rule,
+                    min(child_selection.confidence, 0.70),
+                    STATUS_REQUIRES_REVIEW if child_selection.status != STATUS_FAILED else STATUS_FAILED,
+                    [*child_selection.warnings, "daughter_start mirrors branch_start surface-cut refinement and requires bifurcation review"],
+                    daughter_metadata,
                 )
             )
 
@@ -924,7 +1525,7 @@ def _build_boundary_rings(
                 parent_pre_bifurcation_ring_id=parent_ring_id,
                 daughter_start_ring_ids=daughter_ring_ids,
                 status=STATUS_REQUIRES_REVIEW,
-                warnings=["bifurcation rings are first-pass centerline estimates"],
+                warnings=["parent_pre_bifurcation is first-pass; daughter_start rings reuse branch_start surface-cut refinement"],
             )
         )
 
@@ -938,6 +1539,7 @@ def _assign_surface_segments(
     surface: vtk.vtkPolyData,
     segments: list[GeometrySegment],
     roles: InputRoles,
+    rings: Optional[list[BoundaryRing]] = None,
 ) -> tuple[vtk.vtkPolyData, int, list[str]]:
     warnings: list[str] = []
     segment_lookup = _segment_by_id(segments)
@@ -975,6 +1577,61 @@ def _assign_surface_segments(
             elif int(face_id) in terminal_face_to_segment:
                 assigned_segment_ids[cell_id] = terminal_face_to_segment[int(face_id)]
 
+    branch_start_rings_by_segment: dict[int, BoundaryRing] = {}
+    for ring in rings or []:
+        if ring.ring_type != "branch_start":
+            continue
+        child_id = int(ring.child_segment_id or ring.source_segment_id)
+        if child_id in segment_lookup:
+            branch_start_rings_by_segment[child_id] = ring
+
+    assignment_stats: dict[int, dict[str, int]] = {
+        int(segment_id): {"reassigned": 0, "retained": 0}
+        for segment_id in branch_start_rings_by_segment
+    }
+    if branch_start_rings_by_segment:
+        for cell_id, center in enumerate(centers):
+            assigned_segment_id = int(assigned_segment_ids[cell_id])
+            ring = branch_start_rings_by_segment.get(assigned_segment_id)
+            if ring is None:
+                continue
+            segment = segment_lookup.get(assigned_segment_id)
+            if segment is None or segment.segment_type != "branch":
+                continue
+            selected_s = float(max(0.0, ring.source_centerline_s_mm))
+            if selected_s <= EPS:
+                assignment_stats[assigned_segment_id]["retained"] += 1
+                continue
+
+            projected_s, _ = _project_point_to_polyline_s(segment.points, center)
+            ring_center = np.asarray(ring.center_xyz, dtype=float)
+            ring_normal = unit(np.asarray(ring.normal_xyz, dtype=float))
+            signed_plane_distance = float(np.dot(np.asarray(center, dtype=float) - ring_center, ring_normal))
+            near_ring_tolerance = max(0.25, 0.25 * float(ring.radius_mm))
+            before_selected_s = projected_s < selected_s - 0.05
+            near_and_proximal = projected_s < selected_s + near_ring_tolerance and signed_plane_distance < -0.05
+            if before_selected_s or near_and_proximal:
+                parent_segment_id = int(segment.parent_segment_id or 1)
+                assigned_segment_ids[cell_id] = parent_segment_id if parent_segment_id in segment_lookup else 1
+                assignment_stats[assigned_segment_id]["reassigned"] += 1
+            else:
+                assignment_stats[assigned_segment_id]["retained"] += 1
+
+        for ring in branch_start_rings_by_segment.values():
+            child_id = int(ring.child_segment_id or ring.source_segment_id)
+            stats = assignment_stats.get(child_id, {"reassigned": 0, "retained": 0})
+            ring.metadata["cells_reassigned_to_parent_count"] = int(stats["reassigned"])
+            ring.metadata["cells_retained_in_child_count"] = int(stats["retained"])
+            ring.metadata["surface_assignment_adjusted"] = bool(stats["reassigned"] > 0)
+            if ring.metadata.get("selected_candidate_classification") == "topology_fallback_requires_review":
+                ring.metadata["ring_assignment_consistency_status"] = "requires_review_topology_fallback"
+            elif float(ring.source_centerline_s_mm) <= EPS:
+                ring.metadata["ring_assignment_consistency_status"] = "surface_cut_offset_zero_no_proximal_reassignment"
+            elif stats["reassigned"] > 0:
+                ring.metadata["ring_assignment_consistency_status"] = "corrected_proximal_child_cells_to_parent"
+            else:
+                ring.metadata["ring_assignment_consistency_status"] = "no_proximal_child_cells_detected"
+
     unassigned_cell_count = sum(1 for value in assigned_segment_ids if int(value) <= 0)
     if unassigned_cell_count:
         warnings.append("some surface cells could not be assigned and were folded into aortic_body")
@@ -998,12 +1655,20 @@ def _assign_surface_segments(
             segment.status = STATUS_REQUIRES_REVIEW
             segment.warnings.append("segment has no assigned surface cells")
 
-    warnings.append("surface cells were assigned by nearest centerline segment; cut-boundary consistency requires review")
+    if branch_start_rings_by_segment:
+        corrected_total = sum(int(stats["reassigned"]) for stats in assignment_stats.values())
+        warnings.append(
+            "surface cells were assigned by nearest centerline segment and then corrected using selected branch_start ring offsets"
+        )
+        if corrected_total:
+            warnings.append(f"{int(corrected_total)} proximal branch cell(s) were reassigned to parent segments")
+    else:
+        warnings.append("surface cells were assigned by nearest centerline segment; cut-boundary consistency requires review")
     return out, int(unassigned_cell_count), warnings
 
 
 def _ring_to_json(ring: BoundaryRing) -> dict[str, Any]:
-    return {
+    data = {
         "ring_id": int(ring.ring_id),
         "ring_label": ring.ring_label,
         "ring_type": ring.ring_type,
@@ -1020,6 +1685,10 @@ def _ring_to_json(ring: BoundaryRing) -> dict[str, Any]:
         "status": ring.status,
         "warnings": list(ring.warnings),
     }
+    for key, value in ring.metadata.items():
+        if key not in data:
+            data[key] = value
+    return data
 
 
 def _segment_to_json(segment: GeometrySegment) -> dict[str, Any]:
@@ -1135,6 +1804,89 @@ def _diagnostic_next_focus(failures: list[str], status: str) -> str:
     if status == STATUS_REQUIRES_REVIEW:
         return "Inspect and improve first-pass branch-start and bifurcation ring placement against surface cut boundaries."
     return "Proceed to circular boundary placement accuracy checks."
+
+
+def _branch_start_refinement_diagnostics(result_data: dict[str, Any]) -> dict[str, Any]:
+    rings_json = result_data.get("boundary_rings", [])
+    if not isinstance(rings_json, list):
+        rings_json = []
+    branch_start_rings = [
+        ring for ring in rings_json if isinstance(ring, dict) and ring.get("ring_type") == "branch_start"
+    ]
+    segments_json = result_data.get("segments", [])
+    if not isinstance(segments_json, list):
+        segments_json = []
+    segment_labels_by_id = {
+        int(_safe_float(segment.get("segment_id"), 0.0)): str(segment.get("segment_label", ""))
+        for segment in segments_json
+        if isinstance(segment, dict)
+    }
+
+    per_ring_summary: list[dict[str, Any]] = []
+    refined_ring_count = 0
+    topology_fallback_ring_count = 0
+    stable_candidate_found_count = 0
+    parent_contamination_detected_count = 0
+    cells_reassigned_total = 0
+    rings_requiring_review: list[int] = []
+
+    for ring in branch_start_rings:
+        candidate_metrics = ring.get("candidate_metrics", [])
+        if not isinstance(candidate_metrics, list):
+            candidate_metrics = []
+        stable_found = any(
+            isinstance(candidate, dict) and candidate.get("classification") == "stable_child_tube"
+            for candidate in candidate_metrics
+        )
+        parent_contamination_found = any(
+            isinstance(candidate, dict) and candidate.get("classification") == "too_proximal_parent_contaminated"
+            for candidate in candidate_metrics
+        )
+        if ring.get("surface_cut_used") is True:
+            refined_ring_count += 1
+        if ring.get("selected_candidate_classification") == "topology_fallback_requires_review":
+            topology_fallback_ring_count += 1
+        if stable_found:
+            stable_candidate_found_count += 1
+        if parent_contamination_found:
+            parent_contamination_detected_count += 1
+        if ring.get("status") == STATUS_REQUIRES_REVIEW:
+            try:
+                rings_requiring_review.append(int(ring.get("ring_id", 0)))
+            except Exception:
+                rings_requiring_review.append(0)
+
+        segment_id = int(_safe_float(ring.get("child_segment_id") or ring.get("source_segment_id"), 0.0))
+        cells_reassigned = int(_safe_float(ring.get("cells_reassigned_to_parent_count"), 0.0))
+        cells_reassigned_total += cells_reassigned
+        warnings = ring.get("warnings", [])
+        warning_count = len(warnings) if isinstance(warnings, list) else 0
+        per_ring_summary.append(
+            {
+                "ring_id": int(_safe_float(ring.get("ring_id"), 0.0)),
+                "segment_id": segment_id,
+                "segment_label": segment_labels_by_id.get(segment_id, ""),
+                "selected_offset_mm": ring.get("selected_offset_mm"),
+                "status": ring.get("status"),
+                "classification": ring.get("selected_candidate_classification"),
+                "confidence": ring.get("confidence"),
+                "candidate_count": int(_safe_float(ring.get("candidate_count"), 0.0)),
+                "warning_count": int(warning_count),
+                "cells_reassigned_to_parent_count": int(cells_reassigned),
+            }
+        )
+
+    return {
+        "algorithm": BRANCH_START_RING_ALGORITHM,
+        "branch_count": int(len(branch_start_rings)),
+        "refined_ring_count": int(refined_ring_count),
+        "topology_fallback_ring_count": int(topology_fallback_ring_count),
+        "stable_candidate_found_count": int(stable_candidate_found_count),
+        "parent_contamination_detected_count": int(parent_contamination_detected_count),
+        "cells_reassigned_to_parent_total": int(cells_reassigned_total),
+        "rings_requiring_review": rings_requiring_review,
+        "per_ring_summary": per_ring_summary,
+    }
 
 
 def _build_segmentation_diagnostics(
@@ -1373,6 +2125,7 @@ def _build_segmentation_diagnostics(
             "bifurcations_missing_parent_ring": bifurcations_missing_parent_ring,
             "bifurcations_missing_daughter_rings": bifurcations_missing_daughter_rings,
         },
+        "branch_start_refinement": _branch_start_refinement_diagnostics(result_data),
         "warnings": warnings,
         "failures": failures,
         "next_recommended_focus": _diagnostic_next_focus(failures, status),
@@ -1425,9 +2178,11 @@ def run_geometry_segmentation(
     segments, segment_start_node_to_ids, segment_warnings = _build_segments(
         roles, root_node_id, body_edges, children_by_node, terminal_node_to_face
     )
-    segmented_surface, unassigned_cell_count, assignment_warnings = _assign_surface_segments(surface, segments, roles)
     boundary_rings, rings, bifurcations, ring_warnings = _build_boundary_rings(
         roles, surface, terminations, segments, segment_start_node_to_ids, node_coords
+    )
+    segmented_surface, unassigned_cell_count, assignment_warnings = _assign_surface_segments(
+        surface, segments, roles, rings
     )
 
     segmented_surface_path = output_dir / output_paths.segmented_surface_vtp.name

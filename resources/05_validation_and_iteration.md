@@ -104,6 +104,30 @@ If any old named branch label appears in output VTP labels or JSON segment label
 
 Every branch segment must have a proximal boundary ring.
 
+Every `branch_start` ring must record:
+
+```text
+selection_algorithm = surface_validated_branch_start_ring_v1
+topology_start_xyz
+selected_offset_mm
+candidate_count
+accepted_candidate_count
+selected_candidate_classification
+selected_radius_rule
+surface_cut_used
+candidate_metrics
+cells_reassigned_to_parent_count
+ring_assignment_consistency_status
+```
+
+If `selected_candidate_classification` is `topology_fallback_requires_review`, the ring must be marked:
+
+```text
+requires_review
+```
+
+and the JSON must explain that no stable surface-cut candidate was accepted.
+
 Every bifurcation should have:
 
 ```text
@@ -145,6 +169,18 @@ surface_not_openable
 ring_not_visible
 json_missing_required_fields
 old_named_branch_label
+```
+
+Branch-start refinement diagnostics must also summarize:
+
+```text
+refined_ring_count
+topology_fallback_ring_count
+stable_candidate_found_count
+parent_contamination_detected_count
+cells_reassigned_to_parent_total
+rings_requiring_review
+per_ring_summary
 ```
 
 ## Status Rules

@@ -143,6 +143,39 @@ without including parent wall inside the child segment
 without starting too far inside the child branch
 ```
 
+Branch-start placement must use:
+
+```text
+surface_validated_branch_start_ring_v1
+```
+
+The child centerline start point is only a search origin.
+
+The final branch-start ring is selected by candidate search:
+
+```text
+1. sample offsets along the child centerline from the topology start
+2. cut the input surface with a local plane perpendicular to the child tangent
+3. extract connected cut components
+4. score compact circular candidates by radius, centroid offset, spread, and stability
+5. reject candidates classified as too_proximal_parent_contaminated
+6. avoid candidates classified as too_distal_after_stable_section
+7. choose the earliest stable_child_tube candidate
+8. use the selected offset as the actual parent-child cut-boundary
+```
+
+If no stable candidate exists, topology fallback is allowed only as:
+
+```text
+topology_fallback_requires_review
+```
+
+and the ring must remain:
+
+```text
+requires_review
+```
+
 For bifurcations, estimate:
 
 ```text
@@ -199,6 +232,14 @@ The circular ring must be used as the actual cut-boundary.
 The segmentation should assign parent and child surface cells consistently with the ring.
 
 The final surface segmentation should not depend only on a visual ring if the surface cells are separated differently.
+
+For branch-start rings, the selected `source_centerline_s_mm` from `surface_validated_branch_start_ring_v1` must be applied back to the segmented surface:
+
+```text
+branch cells projected proximal to the selected ring remain with the parent segment
+branch cells distal to the selected ring may belong to the child segment
+the reassignment count is recorded in diagnostics
+```
 
 ### 10. Write Outputs
 

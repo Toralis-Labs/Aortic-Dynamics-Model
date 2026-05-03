@@ -225,6 +225,44 @@ The final authority is whether the circular ring correctly separates parent and 
 
 A ring must not be accepted only because it is located at a centerline graph node.
 
+## Branch-Start Surface Validation
+
+Branch-start rings must use:
+
+```text
+surface_validated_branch_start_ring_v1
+```
+
+The child centerline start point is only a search origin.
+
+It is not the final branch ostium by itself.
+
+For every branch-start ring, the implementation must:
+
+```text
+sample candidate positions along the child centerline
+cut the input surface with a plane perpendicular to the child tangent
+score circular cut components using local surface evidence
+reject too-proximal parent-wall-contaminated candidates
+select the earliest stable child-tube candidate
+use the selected offset to correct parent-child surface cell assignment
+record candidate metrics and selection metadata in segmentation_result.json
+```
+
+If no stable surface-cut candidate is accepted, the code may fall back to the topology start point only as:
+
+```text
+topology_fallback_requires_review
+```
+
+Topology-only branch-start rings must be marked:
+
+```text
+requires_review
+```
+
+and must include a warning explaining that no stable surface-cut candidate was accepted.
+
 The ring must be checked against:
 
 ```text

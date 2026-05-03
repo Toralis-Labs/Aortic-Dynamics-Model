@@ -159,6 +159,31 @@ it is located at a centerline graph node
 the branch centerline begins there
 ```
 
+Codex must use:
+
+```text
+surface_validated_branch_start_ring_v1
+```
+
+for branch-start rings.
+
+The branch centerline start is a search origin only.
+
+The final branch-start ring requires local surface-cut validation, circular candidate scoring, and parent-child surface assignment consistency.
+
+If branch-start placement falls back to the topology start point, the ring must be marked:
+
+```text
+requires_review
+```
+
+with:
+
+```text
+selected_candidate_classification = topology_fallback_requires_review
+surface_cut_used = false
+```
+
 Codex must validate final circular rings using:
 
 ```text
@@ -220,6 +245,8 @@ A ring must not be marked successful unless it is consistent with both:
 surface geometry
 parent-child segment assignment
 ```
+
+The selected branch-start offset must be used to update surface cell assignment so child cells proximal to the selected ring remain assigned to the parent segment.
 
 ## Minimal Change Rule
 
