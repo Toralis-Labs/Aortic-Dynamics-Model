@@ -41,7 +41,7 @@ def array_names(attrs: Any) -> list[str]:
     names: list[str] = []
 
     for idx in range(attrs.GetNumberOfArrays()):
-        arr = attrs.GetArray(idx)
+        arr = attrs.GetAbstractArray(idx)
         if arr is not None:
             names.append(str(arr.GetName()))
 

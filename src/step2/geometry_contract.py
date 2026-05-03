@@ -28,6 +28,7 @@ from src.common.vtk_helpers import (
     add_string_cell_array,
     add_uchar3_cell_array,
     append_polydata,
+    array_names,
     build_regular_polygon_ring_polydata,
     build_segment_point_locator,
     cell_centers,
@@ -45,9 +46,60 @@ STATUS_SUCCESS = "success"
 STATUS_REQUIRES_REVIEW = "requires_review"
 STATUS_FAILED = "failed"
 
+VMTK_REQUIRED_ERROR = "VMTK branch tooling is required by the current geometry segmentation implementation."
+VMTK_BRANCH_CLASSES = [
+    "vmtkBranchExtractor",
+    "vmtkBranchClipper",
+    "vmtkBranchSections",
+]
+
+REQUIRED_SEGMENTED_SURFACE_CELL_ARRAYS = [
+    "SegmentId",
+    "SegmentLabel",
+    "SegmentColor",
+]
+REQUIRED_BOUNDARY_RING_CELL_ARRAYS = [
+    "RingId",
+    "RingLabel",
+    "RingType",
+    "ParentSegmentId",
+    "ChildSegmentId",
+    "SegmentId",
+    "RadiusMm",
+    "Confidence",
+    "Status",
+]
+REQUIRED_RESULT_KEYS = [
+    "status",
+    "inputs",
+    "outputs",
+    "segments",
+    "boundary_rings",
+    "bifurcations",
+    "warnings",
+    "metrics",
+]
+FORBIDDEN_LABEL_FRAGMENTS = [
+    "renal",
+    "sma",
+    "ima",
+    "celiac",
+    "iliac",
+    "left",
+    "right",
+    "external",
+    "internal",
+    "superior_mesenteric",
+    "inferior_mesenteric",
+    "abdominal_aorta_trunk",
+    "aorta_trunk",
+]
+
 
 class GeometrySegmentationFailure(RuntimeError):
-    pass
+    def __init__(self, message: str, *, vmtk: Optional[dict[str, Any]] = None):
+        super().__init__(message)
+        self.vmtk = vmtk
 
 
 @dataclass(frozen=True)
@@ -179,12 +231,22 @@ def _load_input_roles(path: str | Path) -> InputRoles:
     if rules.get("all_other_segments_are_anonymous", True) is not True:
         raise GeometrySegmentationFailure("Input roles must keep all non-aortic segments anonymous.")
 
+    branch_label_prefix = str(rules.get("branch_label_prefix", "branch_"))
+    bifurcation_label_prefix = str(rules.get("bifurcation_label_prefix", "bifurcation_"))
+    ring_label_prefix = str(rules.get("ring_label_prefix", "ring_"))
+    if branch_label_prefix != "branch_":
+        raise GeometrySegmentationFailure("Input roles rules.branch_label_prefix must be branch_.")
+    if bifurcation_label_prefix != "bifurcation_":
+        raise GeometrySegmentationFailure("Input roles rules.bifurcation_label_prefix must be bifurcation_.")
+    if ring_label_prefix != "ring_":
+        raise GeometrySegmentationFailure("Input roles rules.ring_label_prefix must be ring_.")
+
     return InputRoles(
         aortic_inlet_face_id=int(inlet_face_id),
         terminal_face_ids=terminal_face_ids,
-        branch_label_prefix=str(rules.get("branch_label_prefix", "branch_")),
-        bifurcation_label_prefix=str(rules.get("bifurcation_label_prefix", "bifurcation_")),
-        ring_label_prefix=str(rules.get("ring_label_prefix", "ring_")),
+        branch_label_prefix=branch_label_prefix,
+        bifurcation_label_prefix=bifurcation_label_prefix,
+        ring_label_prefix=ring_label_prefix,
     )
 
 
@@ -1003,6 +1065,350 @@ def _relative_path(path: Path, root: Path) -> str:
         return str(path)
 
 
+def _status_rank(status: str) -> int:
+    return {
+        STATUS_SUCCESS: 0,
+        STATUS_REQUIRES_REVIEW: 1,
+        STATUS_FAILED: 2,
+    }.get(str(status), 2)
+
+
+def _worse_status(left: str, right: str) -> str:
+    return left if _status_rank(left) >= _status_rank(right) else right
+
+
+def _append_unique(items: list[str], value: str) -> None:
+    text = str(value).strip()
+    if text and text not in items:
+        items.append(text)
+
+
+def _check_vmtk_branch_tooling() -> dict[str, Any]:
+    diagnostic: dict[str, Any] = {
+        "required": True,
+        "available": False,
+        "python_executable": sys.executable,
+        "classes_checked": list(VMTK_BRANCH_CLASSES),
+        "status": STATUS_FAILED,
+    }
+
+    try:
+        from vmtk import vmtkscripts
+    except Exception as exc:
+        diagnostic["error"] = VMTK_REQUIRED_ERROR
+        diagnostic["exception_type"] = type(exc).__name__
+        diagnostic["exception_message"] = str(exc)
+        return diagnostic
+
+    missing = [name for name in VMTK_BRANCH_CLASSES if not hasattr(vmtkscripts, name)]
+    if missing:
+        diagnostic["error"] = VMTK_REQUIRED_ERROR
+        diagnostic["missing_classes"] = missing
+        return diagnostic
+
+    diagnostic["available"] = True
+    diagnostic["status"] = STATUS_SUCCESS
+    return diagnostic
+
+
+def _cell_array_names(polydata: vtk.vtkPolyData) -> list[str]:
+    return array_names(polydata.GetCellData())
+
+
+def _string_cell_array_values(polydata: vtk.vtkPolyData, name: str) -> list[str]:
+    arr = polydata.GetCellData().GetAbstractArray(name)
+    if arr is None:
+        return []
+
+    values: list[str] = []
+    for idx in range(arr.GetNumberOfTuples()):
+        try:
+            value = arr.GetValue(idx)
+        except Exception:
+            value = arr.GetVariantValue(idx).ToString()
+        values.append(str(value))
+    return sorted(set(values))
+
+
+def _label_has_forbidden_fragment(label: str) -> bool:
+    text = str(label).lower()
+    return any(fragment in text for fragment in FORBIDDEN_LABEL_FRAGMENTS)
+
+
+def _ring_type_counts(rings: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for ring in rings:
+        ring_type = str(ring.get("ring_type", ""))
+        if ring_type:
+            counts[ring_type] = counts.get(ring_type, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _diagnostic_next_focus(failures: list[str], status: str) -> str:
+    if "vmtk_unavailable" in failures:
+        return "Make VMTK branch tooling available in this Python environment, then rerun structural diagnostics."
+    if any(failure.startswith("missing_output") for failure in failures):
+        return "Restore generation of the missing required output files before evaluating ring placement."
+    if any(failure.startswith("missing_segment_array") or failure.startswith("missing_ring_array") for failure in failures):
+        return "Repair the missing required VTP cell-data arrays."
+    if "json_missing_required_fields" in failures:
+        return "Repair segmentation_result.json schema fields before algorithm tuning."
+    if "old_named_branch_label" in failures:
+        return "Remove forbidden named labels from VTP and JSON outputs."
+    if "missing_ring" in failures:
+        return "Add first-pass proximal branch rings for every anonymous branch segment."
+    if status == STATUS_REQUIRES_REVIEW:
+        return "Inspect and improve first-pass branch-start and bifurcation ring placement against surface cut boundaries."
+    return "Proceed to circular boundary placement accuracy checks."
+
+
+def _build_segmentation_diagnostics(
+    project_root: Path,
+    output_dir: Path,
+    result: Optional[dict[str, Any]],
+    vmtk: dict[str, Any],
+    extra_warnings: Optional[list[str]] = None,
+    extra_failures: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    output_paths = build_workspace_paths(project_root)
+    segmented_surface_path = output_dir / output_paths.segmented_surface_vtp.name
+    boundary_rings_path = output_dir / output_paths.boundary_rings_vtp.name
+    segmentation_result_path = output_dir / output_paths.segmentation_result_json.name
+
+    warnings: list[str] = []
+    failures: list[str] = []
+    for warning in extra_warnings or []:
+        _append_unique(warnings, warning)
+    for failure in extra_failures or []:
+        _append_unique(failures, failure)
+
+    outputs_exist = {
+        "segmented_surface_vtp": segmented_surface_path.exists(),
+        "boundary_rings_vtp": boundary_rings_path.exists(),
+        "segmentation_result_json": segmentation_result_path.exists(),
+    }
+    if not outputs_exist["segmented_surface_vtp"]:
+        _append_unique(failures, "missing_output:segmented_surface_vtp")
+    if not outputs_exist["boundary_rings_vtp"]:
+        _append_unique(failures, "missing_output:boundary_rings_vtp")
+    if not outputs_exist["segmentation_result_json"]:
+        _append_unique(failures, "missing_output:segmentation_result_json")
+
+    if vmtk.get("status") != STATUS_SUCCESS or not bool(vmtk.get("available")):
+        _append_unique(failures, "vmtk_unavailable")
+        _append_unique(warnings, VMTK_REQUIRED_ERROR)
+
+    segmented_surface_arrays: list[str] = []
+    boundary_ring_arrays: list[str] = []
+    segment_labels_from_vtp: list[str] = []
+    ring_labels_from_vtp: list[str] = []
+
+    if segmented_surface_path.exists():
+        try:
+            segmented_surface = read_vtp(segmented_surface_path)
+            segmented_surface_arrays = _cell_array_names(segmented_surface)
+            segment_labels_from_vtp = _string_cell_array_values(segmented_surface, "SegmentLabel")
+        except Exception as exc:
+            _append_unique(failures, "surface_not_openable")
+            _append_unique(warnings, f"segmented_surface.vtp could not be opened: {exc}")
+
+    if boundary_rings_path.exists():
+        try:
+            boundary_rings = read_vtp(boundary_rings_path)
+            boundary_ring_arrays = _cell_array_names(boundary_rings)
+            ring_labels_from_vtp = _string_cell_array_values(boundary_rings, "RingLabel")
+        except Exception as exc:
+            _append_unique(failures, "ring_not_visible")
+            _append_unique(warnings, f"boundary_rings.vtp could not be opened: {exc}")
+
+    missing_segmented_surface_arrays = [
+        name for name in REQUIRED_SEGMENTED_SURFACE_CELL_ARRAYS if name not in segmented_surface_arrays
+    ]
+    missing_boundary_ring_arrays = [
+        name for name in REQUIRED_BOUNDARY_RING_CELL_ARRAYS if name not in boundary_ring_arrays
+    ]
+    if missing_segmented_surface_arrays:
+        _append_unique(failures, "missing_segment_array")
+    if missing_boundary_ring_arrays:
+        _append_unique(failures, "missing_ring_array")
+
+    result_data = result
+    if result_data is None and segmentation_result_path.exists():
+        try:
+            loaded = read_json(segmentation_result_path)
+            result_data = loaded if isinstance(loaded, dict) else {}
+        except Exception as exc:
+            _append_unique(failures, "json_missing_required_fields")
+            _append_unique(warnings, f"segmentation_result.json could not be opened: {exc}")
+            result_data = {}
+    if result_data is None:
+        result_data = {}
+
+    missing_result_keys = [name for name in REQUIRED_RESULT_KEYS if name not in result_data]
+    if missing_result_keys:
+        _append_unique(failures, "json_missing_required_fields")
+
+    segments_json = result_data.get("segments", [])
+    if not isinstance(segments_json, list):
+        segments_json = []
+        _append_unique(failures, "json_missing_required_fields")
+    rings_json = result_data.get("boundary_rings", [])
+    if not isinstance(rings_json, list):
+        rings_json = []
+        _append_unique(failures, "json_missing_required_fields")
+    bifurcations_json = result_data.get("bifurcations", [])
+    if not isinstance(bifurcations_json, list):
+        bifurcations_json = []
+        _append_unique(failures, "json_missing_required_fields")
+
+    json_segment_labels = sorted(
+        {str(segment.get("segment_label", "")) for segment in segments_json if isinstance(segment, dict)}
+    )
+    json_ring_labels = sorted({str(ring.get("ring_label", "")) for ring in rings_json if isinstance(ring, dict)})
+    json_bifurcation_labels = sorted(
+        {str(item.get("bifurcation_label", "")) for item in bifurcations_json if isinstance(item, dict)}
+    )
+
+    all_labels = [
+        *segment_labels_from_vtp,
+        *ring_labels_from_vtp,
+        *json_segment_labels,
+        *json_ring_labels,
+        *json_bifurcation_labels,
+    ]
+    forbidden_labels_found = sorted({label for label in all_labels if _label_has_forbidden_fragment(label)})
+    if forbidden_labels_found:
+        _append_unique(failures, "old_named_branch_label")
+        _append_unique(warnings, "forbidden named labels were found in final outputs")
+
+    branch_segments = [
+        segment
+        for segment in segments_json
+        if isinstance(segment, dict)
+        and (segment.get("segment_type") == "branch" or str(segment.get("segment_label", "")).startswith("branch_"))
+    ]
+    segments_missing_proximal_ring = [
+        int(segment.get("segment_id", 0))
+        for segment in branch_segments
+        if not segment.get("proximal_ring_id")
+    ]
+
+    branch_start_child_ids = {
+        int(ring.get("child_segment_id") or ring.get("source_segment_id") or 0)
+        for ring in rings_json
+        if isinstance(ring, dict) and ring.get("ring_type") == "branch_start"
+    }
+    branch_ids = [int(segment.get("segment_id", 0)) for segment in branch_segments]
+    missing_branch_start_ring_ids = [
+        segment_id for segment_id in branch_ids if int(segment_id) not in branch_start_child_ids
+    ]
+    if segments_missing_proximal_ring or missing_branch_start_ring_ids:
+        _append_unique(failures, "missing_ring")
+
+    requires_review_ring_count = sum(
+        1 for ring in rings_json if isinstance(ring, dict) and ring.get("status") == STATUS_REQUIRES_REVIEW
+    )
+    failed_ring_count = sum(1 for ring in rings_json if isinstance(ring, dict) and ring.get("status") == STATUS_FAILED)
+    low_confidence_ring_count = 0
+    for ring in rings_json:
+        if not isinstance(ring, dict):
+            continue
+        try:
+            confidence = float(ring.get("confidence", 1.0))
+        except Exception:
+            confidence = 0.0
+        if confidence < 0.7:
+            low_confidence_ring_count += 1
+
+    bifurcations_missing_parent_ring = [
+        int(item.get("bifurcation_id", 0))
+        for item in bifurcations_json
+        if isinstance(item, dict) and not item.get("parent_pre_bifurcation_ring_id")
+    ]
+    bifurcations_missing_daughter_rings: list[int] = []
+    for item in bifurcations_json:
+        if not isinstance(item, dict):
+            continue
+        child_ids = item.get("child_segment_ids", [])
+        daughter_ids = item.get("daughter_start_ring_ids", [])
+        if not isinstance(child_ids, list) or not isinstance(daughter_ids, list) or len(daughter_ids) < len(child_ids):
+            bifurcations_missing_daughter_rings.append(int(item.get("bifurcation_id", 0)))
+
+    if failed_ring_count:
+        _append_unique(failures, "failed_ring")
+    if bifurcations_missing_parent_ring:
+        _append_unique(failures, "missing_ring:parent_pre_bifurcation")
+    if bifurcations_missing_daughter_rings:
+        _append_unique(failures, "missing_ring:daughter_start")
+
+    if failures:
+        status = STATUS_FAILED
+    elif (
+        requires_review_ring_count
+        or low_confidence_ring_count
+        or any(
+            isinstance(segment, dict) and segment.get("status") == STATUS_REQUIRES_REVIEW for segment in segments_json
+        )
+        or any(isinstance(item, dict) and item.get("status") == STATUS_REQUIRES_REVIEW for item in bifurcations_json)
+        or result_data.get("status") == STATUS_REQUIRES_REVIEW
+        or warnings
+    ):
+        status = STATUS_REQUIRES_REVIEW
+    else:
+        status = STATUS_SUCCESS
+
+    return {
+        "status": status,
+        "vmtk": vmtk,
+        "outputs_exist": outputs_exist,
+        "vtp_arrays": {
+            "segmented_surface_cell_arrays": segmented_surface_arrays,
+            "boundary_rings_cell_arrays": boundary_ring_arrays,
+            "missing_segmented_surface_arrays": missing_segmented_surface_arrays,
+            "missing_boundary_ring_arrays": missing_boundary_ring_arrays,
+        },
+        "json": {
+            "top_level_keys": sorted(result_data.keys()),
+            "missing_top_level_keys": missing_result_keys,
+        },
+        "labels": {
+            "segment_labels": sorted(set([*segment_labels_from_vtp, *json_segment_labels])),
+            "ring_labels": sorted(set([*ring_labels_from_vtp, *json_ring_labels])),
+            "bifurcation_labels": json_bifurcation_labels,
+            "forbidden_labels_found": forbidden_labels_found,
+        },
+        "segments": {
+            "segment_count": int(len(segments_json)),
+            "branch_count": int(len(branch_segments)),
+            "aortic_body_count": int(
+                sum(
+                    1
+                    for segment in segments_json
+                    if isinstance(segment, dict) and segment.get("segment_label") == "aortic_body"
+                )
+            ),
+            "segments_missing_proximal_ring": segments_missing_proximal_ring,
+        },
+        "rings": {
+            "ring_count": int(len(rings_json)),
+            "ring_types": _ring_type_counts([ring for ring in rings_json if isinstance(ring, dict)]),
+            "requires_review_ring_count": int(requires_review_ring_count),
+            "failed_ring_count": int(failed_ring_count),
+            "low_confidence_ring_count": int(low_confidence_ring_count),
+            "missing_branch_start_ring_count": int(len(missing_branch_start_ring_ids)),
+            "missing_branch_start_segment_ids": missing_branch_start_ring_ids,
+        },
+        "bifurcations": {
+            "bifurcation_count": int(len(bifurcations_json)),
+            "bifurcations_missing_parent_ring": bifurcations_missing_parent_ring,
+            "bifurcations_missing_daughter_rings": bifurcations_missing_daughter_rings,
+        },
+        "warnings": warnings,
+        "failures": failures,
+        "next_recommended_focus": _diagnostic_next_focus(failures, status),
+    }
+
+
 def _result_status(segments: list[GeometrySegment], rings: list[BoundaryRing], warnings: list[str]) -> str:
     if any(segment.status == STATUS_FAILED for segment in segments) or any(ring.status == STATUS_FAILED for ring in rings):
         return STATUS_FAILED
@@ -1023,8 +1429,14 @@ def run_geometry_segmentation(
     input_roles_path: Path,
     output_dir: Path,
 ) -> dict[str, Any]:
-    _require_paths([surface_path, centerline_network_path, centerline_metadata_path, input_roles_path])
     output_dir.mkdir(parents=True, exist_ok=True)
+    output_paths = build_workspace_paths(project_root)
+
+    vmtk = _check_vmtk_branch_tooling()
+    if vmtk.get("status") != STATUS_SUCCESS or not bool(vmtk.get("available")):
+        return _failed_result(project_root, output_dir, VMTK_REQUIRED_ERROR, vmtk=vmtk)
+
+    _require_paths([surface_path, centerline_network_path, centerline_metadata_path, input_roles_path])
 
     roles = _load_input_roles(input_roles_path)
     metadata = read_json(centerline_metadata_path)
@@ -1051,10 +1463,10 @@ def run_geometry_segmentation(
         roles, surface, terminations, segments, segment_start_node_to_ids, node_coords
     )
 
-    output_paths = build_workspace_paths(project_root)
     segmented_surface_path = output_dir / output_paths.segmented_surface_vtp.name
     boundary_rings_path = output_dir / output_paths.boundary_rings_vtp.name
     segmentation_result_path = output_dir / output_paths.segmentation_result_json.name
+    segmentation_diagnostics_path = output_dir / output_paths.segmentation_diagnostics_json.name
 
     write_vtp(segmented_surface, segmented_surface_path)
     write_vtp(boundary_rings, boundary_rings_path)
@@ -1071,10 +1483,12 @@ def run_geometry_segmentation(
 
     requires_review_ring_count = sum(1 for ring in rings if ring.status == STATUS_REQUIRES_REVIEW)
     failed_ring_count = sum(1 for ring in rings if ring.status == STATUS_FAILED)
+    low_confidence_ring_count = sum(1 for ring in rings if ring.confidence < 0.7)
     status = _result_status(segments, rings, warnings)
 
     result = {
         "status": status,
+        "vmtk": vmtk,
         "inputs": {
             "surface": _relative_path(surface_path, project_root),
             "centerline_network": _relative_path(centerline_network_path, project_root),
@@ -1088,6 +1502,7 @@ def run_geometry_segmentation(
             "segmented_surface": _relative_path(segmented_surface_path, project_root),
             "boundary_rings": _relative_path(boundary_rings_path, project_root),
             "segmentation_result": _relative_path(segmentation_result_path, project_root),
+            "segmentation_diagnostics": _relative_path(segmentation_diagnostics_path, project_root),
         },
         "segments": [_segment_to_json(segment) for segment in segments],
         "boundary_rings": [_ring_to_json(ring) for ring in rings],
@@ -1102,44 +1517,74 @@ def run_geometry_segmentation(
             "unassigned_cell_count": int(unassigned_cell_count),
             "requires_review_ring_count": int(requires_review_ring_count),
             "failed_ring_count": int(failed_ring_count),
+            "low_confidence_ring_count": int(low_confidence_ring_count),
         },
     }
 
     write_json(result, segmentation_result_path)
+    diagnostics = _build_segmentation_diagnostics(project_root, output_dir, result, vmtk)
+    result["status"] = _worse_status(str(result.get("status", STATUS_FAILED)), str(diagnostics.get("status", STATUS_FAILED)))
+    for warning in diagnostics.get("warnings", []):
+        _append_unique(result["warnings"], warning)
+    if diagnostics.get("failures"):
+        _append_unique(result["warnings"], "structural diagnostics reported failure")
+    write_json(result, segmentation_result_path)
+    write_json(diagnostics, segmentation_diagnostics_path)
     return result
 
 
-def _failed_result(project_root: Path, output_dir: Path, message: str) -> None:
+def _failed_result(
+    project_root: Path,
+    output_dir: Path,
+    message: str,
+    vmtk: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    vmtk_diagnostic = vmtk if vmtk is not None else _check_vmtk_branch_tooling()
+    result = {
+        "status": STATUS_FAILED,
+        "vmtk": vmtk_diagnostic,
+        "inputs": {},
+        "outputs": {},
+        "segments": [],
+        "boundary_rings": [],
+        "bifurcations": [],
+        "warnings": [str(message)],
+        "metrics": {
+            "segment_count": 0,
+            "branch_count": 0,
+            "bifurcation_count": 0,
+            "ring_count": 0,
+            "surface_cell_count": 0,
+            "unassigned_cell_count": 0,
+            "requires_review_ring_count": 0,
+            "failed_ring_count": 0,
+            "low_confidence_ring_count": 0,
+        },
+    }
+
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
         output_paths = build_workspace_paths(project_root)
         result_path = output_dir / output_paths.segmentation_result_json.name
-        write_json(
-            {
-                "status": STATUS_FAILED,
-                "inputs": {},
-                "outputs": {
-                    "segmentation_result": _relative_path(result_path, project_root),
-                },
-                "segments": [],
-                "boundary_rings": [],
-                "bifurcations": [],
-                "warnings": [str(message)],
-                "metrics": {
-                    "segment_count": 0,
-                    "branch_count": 0,
-                    "bifurcation_count": 0,
-                    "ring_count": 0,
-                    "surface_cell_count": 0,
-                    "unassigned_cell_count": 0,
-                    "requires_review_ring_count": 0,
-                    "failed_ring_count": 0,
-                },
-            },
-            result_path,
+        diagnostics_path = output_dir / output_paths.segmentation_diagnostics_json.name
+        result["outputs"] = {
+            "segmentation_result": _relative_path(result_path, project_root),
+            "segmentation_diagnostics": _relative_path(diagnostics_path, project_root),
+        }
+        write_json(result, result_path)
+        diagnostics = _build_segmentation_diagnostics(
+            project_root,
+            output_dir,
+            result,
+            vmtk_diagnostic,
+            extra_warnings=[str(message)],
+            extra_failures=["runtime_failure"],
         )
+        write_json(diagnostics, diagnostics_path)
     except Exception:
-        return
+        return result
+
+    return result
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -1168,12 +1613,20 @@ def main(argv: Optional[list[str]] = None) -> int:
             output_dir=output_dir,
         )
     except GeometrySegmentationFailure as exc:
-        _failed_result(project_root, output_dir, str(exc))
+        _failed_result(project_root, output_dir, str(exc), vmtk=getattr(exc, "vmtk", None))
         print(f"Geometry segmentation failed: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:
         _failed_result(project_root, output_dir, f"Unhandled geometry segmentation error: {exc}")
         print(f"Geometry segmentation failed: {exc}", file=sys.stderr)
+        return 1
+
+    if result.get("status") == STATUS_FAILED:
+        first_warning = ""
+        warnings = result.get("warnings")
+        if isinstance(warnings, list) and warnings:
+            first_warning = f": {warnings[0]}"
+        print(f"Geometry segmentation failed{first_warning}", file=sys.stderr)
         return 1
 
     print(

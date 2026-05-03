@@ -18,6 +18,7 @@ class WorkspacePaths:
     segmented_surface_vtp: Path
     boundary_rings_vtp: Path
     segmentation_result_json: Path
+    segmentation_diagnostics_json: Path
 
 
 def build_workspace_paths(project_root: str | Path) -> WorkspacePaths:
@@ -36,6 +37,7 @@ def build_workspace_paths(project_root: str | Path) -> WorkspacePaths:
         segmented_surface_vtp=output_dir / "segmented_surface.vtp",
         boundary_rings_vtp=output_dir / "boundary_rings.vtp",
         segmentation_result_json=output_dir / "segmentation_result.json",
+        segmentation_diagnostics_json=output_dir / "segmentation_diagnostics.json",
     )
 
 
