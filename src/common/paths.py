@@ -41,10 +41,3 @@ def build_workspace_paths(project_root: str | Path) -> WorkspacePaths:
 
 def script_project_root(script_file: str | Path) -> Path:
     return Path(script_file).resolve().parent
-
-
-# Temporary compatibility alias.
-# Remove this after src/step2/geometry_contract.py is refactored to call
-# build_workspace_paths directly.
-def build_pipeline_paths(project_root: str | Path) -> WorkspacePaths:
-    return build_workspace_paths(project_root)
