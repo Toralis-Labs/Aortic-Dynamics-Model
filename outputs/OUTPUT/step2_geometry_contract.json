@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "step_name": "step2_geometry_contract",
+  "step_status": "failed",
+  "warnings": [
+    "Missing required input(s): centerlines_raw_debug: C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\Output files\\STEP1\\centerlines_raw_debug.vtp"
+  ],
+  "input_paths": {
+    "input_vtp": "",
+    "face_map": "",
+    "surface_cleaned": null,
+    "centerlines_raw_debug": null,
+    "centerline_network": null,
+    "step1_metadata": null
+  },
+  "output_paths": {
+    "segments_vtp": null,
+    "aorta_centerline": null,
+    "contract_json": "C:\\Users\\ibrah\\OneDrive\\Desktop\\Fluids Project\\Vascular specific\\Output files\\STEP2\\step2_geometry_contract.json"
+  },
+  "upstream_references": {
+    "surface_cleaned": null,
+    "centerlines_raw_debug": null,
+    "centerline_network": null,
+    "centerline_network_metadata": null
+  },
+  "coordinate_system": {
+    "name": "source_model_coordinates",
+    "units": "mm"
+  },
+  "units": "mm",
+  "aorta_start": {},
+  "aorta_end": {},
+  "aorta_trunk": {
+    "length": null,
+    "node_path": [],
+    "centerline_vtp": null
+  },
+  "segment_summary": [],
+  "boundary_summary": {},
+  "fallback_details": {
+    "fallback_assigned_cells": 0,
+    "fallback_percentage": 0.0,
+    "priority_region_fallback_authored": false,
+    "policy": {
+      "requires_review_gt": 0.05,
+      "failed_gt": 0.15,
+      "priority_regions_force_review": [
+        "aortic_inlet",
+        "aortic_bifurcation",
+        "renal_origins",
+        "iliac_split_boundaries"
+      ]
+    }
+  },
+  "qa": {
+    "assignment_algorithm": "vmtk_branch_group_segmentation_v1",
+    "tunnel_assignment_algorithm": "face_map_outlet_routes_parent_junction_v1",
+    "mesh_partition_algorithm": "vmtk_branch_clipper_v1",
+    "total_surface_cells": 0,
+    "assigned_cells": 0,
+    "unassigned_cells": null,
+    "fallback_assigned_cells": 0,
+    "fallback_percentage": 0.0,
+    "assignment_mode_counts": {},
+    "seed_counts_by_segment": {},
+    "vmtk": {},
+    "vmtk_import_source": null,
+    "vmtk_python": null,
+    "vmtk_branch_extractor_group_count": 0,
+    "vmtk_clipped_surface_group_count": 0,
+    "vmtk_mixed_group_cells": 0,
+    "terminal_face_group_min_confidence": null,
+    "branch_groups_labeled_as_aorta": 0,
+    "aorta_groups_labeled_as_branch": 0,
+    "barrier_cell_count": 0,
+    "blocked_edge_count": 0,
+    "tunnel_seed_cells": 0,
+    "tunnel_candidate_cells": 0,
+    "tunnel_component_cells": 0,
+    "tunnel_component_count": 0,
+    "tunnel_component_claimed_cells": 0,
+    "orphan_branch_components": 0,
+    "rejected_orphan_branch_components": 0,
+    "rejected_orphan_branch_component_cells": 0,
+    "branch_tunnel_owned_cells": 0,
+    "branch_tunnel_owner_segments": 0,
+    "aorta_excluded_branch_seed_cells": 0,
+    "branch_owned_aorta_labeled_cells": 0,
+    "branch_owned_reassigned_from_aorta": 0,
+    "branch_labeled_parent_aorta_wall_cells": 0,
+    "non_empty_segment_count": 0,
+    "segment_count": 0,
+    "aorta_start_confidence": null,
+    "aorta_end_confidence": null,
+    "upstream_step1_warning_count": 0,
+    "step_status": "failed"
+  }
+}
