@@ -7,7 +7,8 @@ Every run must validate only the minimal outputs.
 The main visual inspection target is:
 
 ```text
-branch does not start on parent/aortic wall
+ring-to-color consistency
+branch color must begin at the branch_start ring
 ```
 
 Do not add debug outputs to compensate for uncertain geometry.
@@ -144,6 +145,68 @@ or:
 failed
 ```
 
+For each `branch_start` ring, validate that child `SegmentColor` begins at that ring.
+
+Check that child color does not extend proximal to the ring plane beyond tolerance.
+
+Surface cells on the parent side of the ring plane must be reassigned to parent.
+
+Check:
+
+```text
+ring_plane_parent_side_violation_count
+cells_ambiguous_near_ring_count
+```
+
+If any branch has color crossing the ring, status must be:
+
+```text
+requires_review
+```
+
+or:
+
+```text
+failed
+```
+
+If projection-only assignment is still used, status must be:
+
+```text
+requires_review
+```
+
+## Visible Ring Minimalism Check
+
+`boundary_rings.vtp` ring count should be minimal.
+
+`boundary_rings.vtp` is a minimal interface output.
+
+Default visible rings should be only:
+
+```text
+aortic_body_start
+aortic_body_end
+branch_start
+parent_pre_bifurcation only if distinct and useful
+```
+
+`branch_end` rings are not written by default.
+
+Duplicate `daughter_start` rings are not written by default.
+
+`branch_end` rings should not be visible by default.
+
+Duplicate `daughter_start` rings should not be visible by default.
+
+The visible ring count should roughly equal:
+
+```text
+branch_start_ring_count
++ aortic_body_start/end
++ distinct parent_pre_bifurcation rings if retained
+```
+
 ## Diagnostics Contract
 
 If `outputs/segmentation_diagnostics.json` exists, it must be compact.
@@ -155,7 +218,9 @@ status
 outputs_exist
 vtp_arrays
 labels
+visible_rings
 branch_start_refinement
+surface_assignment_consistency
 warnings
 failures
 next_recommended_focus
@@ -175,12 +240,38 @@ rings_requiring_review
 per_ring_summary
 ```
 
+Allowed `visible_rings` fields:
+
+```text
+visible_ring_count
+branch_start_ring_count
+hidden_or_suppressed_duplicate_ring_count
+branch_end_rings_suppressed
+duplicate_daughter_start_rings_suppressed
+```
+
+Allowed `surface_assignment_consistency` fields:
+
+```text
+surface_assignment_mode
+ring_plane_assignment_tolerance_mm
+ring_plane_parent_side_violation_total
+ambiguous_near_ring_total
+segments_with_color_crossing_ring_count
+cells_reassigned_to_parent_total
+cells_reassigned_to_child_total
+rings_requiring_review
+per_ring_summary
+```
+
 Each `per_ring_summary` item must contain only:
 
 ```text
 ring_id
 segment_id
 segment_label
+surface_assignment_mode
+ring_plane_assignment_tolerance_mm
 selected_offset_mm
 status
 classification
@@ -188,7 +279,25 @@ confidence
 candidate_count
 warning_count
 cells_reassigned_to_parent_count
+cells_reassigned_to_child_count
+cells_ambiguous_near_ring_count
+ring_plane_parent_side_violation_count
+ring_surface_consistency_status
 ```
+
+`segmentation_diagnostics.json` should include compact aggregate values:
+
+```text
+visible_ring_count
+branch_start_ring_count
+hidden_or_suppressed_duplicate_ring_count
+ring_plane_assignment_tolerance_mm
+ring_plane_parent_side_violation_total
+ambiguous_near_ring_total
+segments_with_color_crossing_ring_count
+```
+
+Do not add per-cell diagnostics.
 
 Diagnostics must not include raw surface points, raw candidate points, raw cut contour points, raw candidate contours, large arrays, or plane-cut component dumps.
 
@@ -215,7 +324,7 @@ Every code iteration must target the smallest specific failure.
 For the next code prompt, the only allowed target is:
 
 ```text
-surface-validated branch_start ring selection and surface assignment correction
+ring-plane-gated surface assignment and visible ring minimalism
 ```
 
-Do not add outputs, new schemas, broad helpers, or architecture while validating this target.
+Do not add output files, VTP arrays, per-cell diagnostics, broad helpers, or architecture while validating this target.

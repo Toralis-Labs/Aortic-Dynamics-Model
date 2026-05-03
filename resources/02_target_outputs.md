@@ -82,7 +82,9 @@ branch_003
 
 The selected circular ring must affect surface cell assignment.
 
-Surface cells associated with a child branch but lying proximal to the selected `branch_start` ring must be reassigned to the parent segment.
+The branch color must begin at the `branch_start` ring.
+
+Surface cells associated with a child branch but lying proximal to the selected `branch_start` ring plane beyond tolerance must be reassigned to the parent segment.
 
 If `segmented_surface.vtp` and `boundary_rings.vtp` disagree, the output status must be:
 
@@ -98,7 +100,11 @@ failed
 
 ## outputs/boundary_rings.vtp
 
-This file must contain only circular ring geometry for actual cut-boundaries.
+`boundary_rings.vtp` is a minimal interface output.
+
+It is not a full internal debug dump.
+
+This file must contain only circular ring geometry for operational boundaries needed to interpret `outputs/segmented_surface.vtp`.
 
 Required and allowed cell-data arrays are exactly:
 
@@ -123,6 +129,44 @@ Do not put large debug metadata into VTP arrays.
 VTP files are for visual inspection and minimum segment/ring selection.
 
 Detailed candidate reasoning belongs only in compact JSON.
+
+Default visible ring types are:
+
+```text
+aortic_body_start
+aortic_body_end
+branch_start
+parent_pre_bifurcation only if distinct and useful
+```
+
+Hidden/internal-only ring concepts by default are:
+
+```text
+branch_end
+duplicate daughter_start
+```
+
+`branch_start` rings are required and visible.
+
+`aortic_body_start` and `aortic_body_end` may remain visible.
+
+`parent_pre_bifurcation` rings may remain visible only when they represent distinct useful parent boundaries.
+
+`branch_end` rings are not written by default unless a future prompt explicitly requests them.
+
+Duplicate `daughter_start` rings are not written by default.
+
+If a `daughter_start` concept is needed for JSON topology, it should reference the corresponding `branch_start` ring ID instead of creating duplicate visible geometry.
+
+The expected visible ring count is roughly:
+
+```text
+visible branch_start rings
++ aortic_body_start/end
++ distinct parent_pre_bifurcation rings if retained
+```
+
+It must not include duplicate `daughter_start` rings or routine `branch_end` rings.
 
 ## outputs/segmentation_result.json
 
@@ -201,6 +245,32 @@ cells_reassigned_to_parent_count
 candidate_summary
 ```
 
+Allowed compact surface assignment consistency metadata for each `branch_start` ring:
+
+```text
+surface_assignment_mode
+ring_plane_assignment_tolerance_mm
+cells_reassigned_to_parent_count
+cells_reassigned_to_child_count
+cells_ambiguous_near_ring_count
+ring_plane_parent_side_violation_count
+ring_surface_consistency_status
+```
+
+Allowed values for `surface_assignment_mode`:
+
+```text
+ring_plane_gated
+ring_plane_gated_with_connectivity_cleanup
+projection_only_requires_review
+```
+
+If the code still uses projection-only assignment, the ring status or overall status must be:
+
+```text
+requires_review
+```
+
 Required branch-start selection algorithm value:
 
 ```text
@@ -242,6 +312,8 @@ status
 warnings
 ```
 
+If `daughter_start_ring_ids` would duplicate visible `branch_start` ring geometry, they must reference the corresponding `branch_start` ring IDs instead of requiring separate visible rings.
+
 ## Metrics
 
 `metrics` must contain compact run-level counts only.
@@ -253,6 +325,13 @@ segment_count
 branch_count
 bifurcation_count
 ring_count
+visible_ring_count
+branch_start_ring_count
+hidden_or_suppressed_duplicate_ring_count
+ring_plane_assignment_tolerance_mm
+ring_plane_parent_side_violation_total
+ambiguous_near_ring_total
+segments_with_color_crossing_ring_count
 surface_cell_count
 unassigned_cell_count
 requires_review_ring_count

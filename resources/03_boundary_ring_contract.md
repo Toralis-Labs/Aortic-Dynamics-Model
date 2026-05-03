@@ -8,11 +8,13 @@ It separates a parent segment from a child segment.
 
 It is not decorative.
 
-It must be visible in:
+Operational visible boundary rings are written to:
 
 ```text
 outputs/boundary_rings.vtp
 ```
+
+`boundary_rings.vtp` is a minimal interface output, not a full internal ring dump.
 
 It must be recorded compactly in:
 
@@ -107,7 +109,7 @@ The circular ring is not only a visual marker.
 
 The selected ring must affect surface cell assignment.
 
-Surface cells associated with a child branch but lying proximal to the selected `branch_start` ring must be reassigned to the parent segment.
+Surface cells associated with a child branch but lying proximal to the selected `branch_start` ring plane beyond tolerance must be reassigned to the parent segment.
 
 The segmented surface must be consistent with the selected boundary ring.
 
@@ -129,6 +131,96 @@ Forbidden state:
 boundary_rings.vtp shows a refined ring
 segmented_surface.vtp still starts the branch at the old topology point
 ```
+
+## Ring-To-Color Consistency Contract
+
+Ring-to-color consistency is the primary target.
+
+The `branch_start` ring is the start of the child segment color.
+
+The branch color must begin at the `branch_start` ring.
+
+The segmented surface must not show child color on the parent/proximal side of the selected `branch_start` ring.
+
+The color boundary must not extend proximal to the ring beyond tolerance.
+
+Surface cells on the parent side of the ring plane must be reassigned to parent.
+
+If the child color crosses the ring beyond tolerance, the output status must be:
+
+```text
+requires_review
+```
+
+or:
+
+```text
+failed
+```
+
+Ring-plane-gated assignment is required.
+
+Centerline projection alone is insufficient for steep branches because parent-wall cells may project onto the child centerline after the selected offset.
+
+## Ring-Plane-Gated Surface Assignment
+
+Ring-plane-gated surface assignment means:
+
+```text
+For each branch_start ring, the ring center and ring normal define a boundary plane.
+A child segment cell is valid only if it lies on the distal/child side of that plane within the allowed tolerance.
+A child segment cell that lies proximal/parent-side of the ring plane beyond tolerance must be reassigned to the parent segment.
+```
+
+This is required because the interface goal is that the visible child color starts at the `branch_start` ring.
+
+The implementation must use ring-plane signed distance and/or clipping/connectivity logic to enforce the boundary.
+
+## Millimetre Tolerance Contract
+
+The code must define and report a ring-plane assignment tolerance.
+
+Recommended first value:
+
+```text
+RING_PLANE_ASSIGNMENT_TOLERANCE_MM = 0.20
+```
+
+Allowed range for the first implementation:
+
+```text
+0.10 mm to 0.30 mm
+```
+
+This tolerance controls how close a surface cell center may be to the `branch_start` ring plane before it is treated as ambiguous rather than definitely parent-side or child-side.
+
+The tolerance must be recorded compactly in `segmentation_result.json` metrics or `segmentation_diagnostics.json`.
+
+If cells near the ring plane are ambiguous, the run may be:
+
+```text
+requires_review
+```
+
+Do not create a new VTP array for tolerance.
+
+Do not create extra debug files for tolerance.
+
+## Surface Connectivity Contract
+
+After ring-plane gating, the child-colored region should be the connected distal child-side component.
+
+If disconnected child-colored patches remain proximal to the ring or isolated around the parent wall, they must be reassigned to parent or the output must be:
+
+```text
+requires_review
+```
+
+The code may use VTK connectivity logic or its own cell-adjacency connected-component cleanup.
+
+The goal is not just to classify individual cells by nearest centerline.
+
+The goal is a visually continuous child branch segment beginning at the `branch_start` ring.
 
 ## Ring Geometry
 
@@ -164,7 +256,7 @@ Minimum side count:
 
 ## Ring Types
 
-Allowed ring types only:
+Allowed ring types as internal concepts only:
 
 ```text
 aortic_body_start
@@ -176,6 +268,25 @@ daughter_start
 ```
 
 Do not introduce anatomy-specific ring types.
+
+Default visible ring types in `outputs/boundary_rings.vtp` are only:
+
+```text
+aortic_body_start
+aortic_body_end
+branch_start
+parent_pre_bifurcation only if distinct and useful
+```
+
+`branch_end` rings are not written by default unless a future prompt explicitly requests them.
+
+Duplicate `daughter_start` rings are not written by default.
+
+If a `daughter_start` concept is needed for JSON topology, it should reference the corresponding `branch_start` ring ID instead of creating duplicate visible geometry.
+
+Visible duplicate rings must be removed or suppressed when they do not represent distinct boundaries.
+
+The default `boundary_rings.vtp` should be visually uncluttered.
 
 ## Ring Radius
 
@@ -199,7 +310,7 @@ requires_review
 
 ## Ring Orientation
 
-Required orientation rules:
+Required orientation rules when that ring concept is emitted or recorded:
 
 ```text
 branch_start normal = child branch centerline tangent
