@@ -15,7 +15,7 @@
 - [x] Ensure STEP3 consumes canonical STEP2 without legacy fallback.
 - [x] Keep default STEP2 outputs to the three approved core artifacts.
 - [x] Write optional debug artifacts only when requested.
-- [x] Tighten branch-origin assignment with ostium footprint seeds.
+- [x] Rewrite STEP2 around face-map-driven outlet tunnels and anatomical cut partitioning.
 
 ## STEP3
 
@@ -39,5 +39,5 @@
 
 - [x] Run static import checks.
 - [x] Run STEP1/STEP2 smoke test with VMTK available.
-- [ ] Run STEP3 smoke test against the refreshed STEP2 contract.
+- [x] Run STEP3 smoke test against the refreshed STEP2 contract.
 - [x] Confirm generated outputs stay ignored by Git.

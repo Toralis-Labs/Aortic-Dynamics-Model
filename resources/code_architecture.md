@@ -14,8 +14,9 @@ phase.
   the shared centerline network, and writes the STEP1 metadata contract.
 - STEP2 is the geometry-authoring layer. It consumes STEP1 outputs explicitly, resolves
   the abdominal aorta inlet and pre-bifurcation end, creates one aorta trunk polyline,
-  assigns surface cells to bounded topology segments, and writes the canonical STEP2
-  JSON contract.
+  follows named outlet tunnels through the STEP1 graph, authors anatomical tunnel cuts,
+  partitions the surface into topology segments, and writes the canonical STEP2 JSON
+  contract.
 - STEP3 is the naming and landmark layer. It consumes STEP2 as geometric truth and adds
   vessel names, priority classification, proximal/distal metadata, and named VTP outputs.
 - STEP4 is the measurement layer. It will consume STEP3 named anatomy and write grouped

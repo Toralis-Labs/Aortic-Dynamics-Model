@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import heapq
+import importlib
 import math
+import os
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
@@ -18,7 +23,6 @@ from src.common.geometry import (
     equivalent_diameter_from_area,
     point_at_arclength,
     polygon_area_normal,
-    projected_major_minor_diameters,
     tangent_at_arclength,
     unit,
 )
@@ -40,12 +44,142 @@ from src.common.vtk_helpers import (
 )
 
 
-PROXIMAL_BOUNDARY_SELECTION_ALGORITHM = "first_stable_surface_ostium_v2"
-SURFACE_ASSIGNMENT_ALGORITHM = "surface_seeded_propagation_v3_ostium_footprint"
+PROXIMAL_BOUNDARY_SELECTION_ALGORITHM = "vmtk_branch_clip_group_boundary_v1"
+MESH_PARTITION_ALGORITHM = "vmtk_branch_clipper_v1"
+SURFACE_ASSIGNMENT_ALGORITHM = "vmtk_branch_group_segmentation_v1"
+TUNNEL_ASSIGNMENT_ALGORITHM = "face_map_outlet_routes_parent_junction_v1"
+_STEP2_VMTK_REEXEC_ENV = "STEP2_VMTK_REEXEC_ACTIVE"
+_STEP2_VMTK_PYTHON_ENV = "STEP2_VMTK_PYTHON"
+_VMTK_REQUIRED_SCRIPT_CLASSES = ("vmtkBranchExtractor", "vmtkBranchClipper", "vmtkBranchSections")
+EXPECTED_ANATOMY_NAMES = {
+    "abdominal_aorta_inlet",
+    "celiac_artery",
+    "celiac_branch",
+    "superior_mesenteric_artery",
+    "left_renal_artery",
+    "right_renal_artery",
+    "inferior_mesenteric_artery",
+    "left_external_iliac",
+    "right_external_iliac",
+    "left_internal_iliac",
+    "right_internal_iliac",
+}
 
 
 class Step2Failure(RuntimeError):
     pass
+
+
+class Step2RequiresReview(Step2Failure):
+    pass
+
+
+def _normalize_path_key(path: str | Path) -> str:
+    return os.path.normcase(str(Path(path).resolve()))
+
+
+def _iter_vmtk_python_candidates(project_root: Path) -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def add(raw: str | Path | None) -> None:
+        if not raw:
+            return
+        path = Path(raw).expanduser()
+        try:
+            path = path.resolve()
+        except Exception:
+            return
+        if not path.is_file():
+            return
+        key = _normalize_path_key(path)
+        if key in seen or key == _normalize_path_key(sys.executable):
+            return
+        seen.add(key)
+        candidates.append(path)
+
+    add(os.environ.get(_STEP2_VMTK_PYTHON_ENV))
+    add(Path(os.environ.get("CONDA_PREFIX", "")) / "python.exe")
+    add(project_root / ".tools" / "m" / "envs" / "vmtk-step2" / "python.exe")
+    add(project_root / ".tools" / "micromamba_root" / "envs" / "vmtk-step2" / "python.exe")
+
+    home = Path.home()
+    for root in (home / "miniconda3", home / "anaconda3", home / "mambaforge", home / "miniforge3"):
+        for env_name in ("vmtk-step2", "vmtk_env", "vmtk", "simvascular", "sv"):
+            add(root / "envs" / env_name / "python.exe")
+        envs_dir = root / "envs"
+        if envs_dir.is_dir():
+            for pattern in ("*vmtk*", "*vascular*"):
+                for match in envs_dir.glob(pattern):
+                    add(match / "python.exe")
+    return candidates
+
+
+def _python_supports_vmtk_branch_tools(python_exe: str | Path) -> bool:
+    probe = """
+import importlib
+import sys
+try:
+    mod = importlib.import_module("vmtk.vmtkscripts")
+    required = ("vmtkBranchExtractor", "vmtkBranchClipper", "vmtkBranchSections")
+    sys.exit(0 if all(hasattr(mod, name) for name in required) else 1)
+except Exception:
+    sys.exit(1)
+""".strip()
+    try:
+        completed = subprocess.run(
+            [str(python_exe), "-c", probe],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+            check=False,
+        )
+    except Exception:
+        return False
+    return completed.returncode == 0
+
+
+def _current_python_supports_vmtk_branch_tools() -> bool:
+    try:
+        mod = importlib.import_module("vmtk.vmtkscripts")
+    except Exception:
+        return False
+    return all(hasattr(mod, name) for name in _VMTK_REQUIRED_SCRIPT_CLASSES)
+
+
+def _maybe_reexec_with_vmtk_python(project_root: Path) -> None:
+    if os.environ.get(_STEP2_VMTK_REEXEC_ENV) == "1":
+        return
+    if _current_python_supports_vmtk_branch_tools():
+        return
+    for candidate in _iter_vmtk_python_candidates(project_root):
+        if not _python_supports_vmtk_branch_tools(candidate):
+            continue
+        entrypoint = Path(sys.argv[0]).resolve()
+        env = os.environ.copy()
+        env[_STEP2_VMTK_REEXEC_ENV] = "1"
+        env[_STEP2_VMTK_PYTHON_ENV] = str(candidate)
+        sys.stderr.write(f"INFO: relaunching STEP2 with VMTK-capable interpreter: {candidate}\n")
+        completed = subprocess.run([str(candidate), str(entrypoint), *sys.argv[1:]], env=env, check=False)
+        raise SystemExit(int(completed.returncode))
+
+
+def _import_vmtk_scripts() -> tuple[Any, Dict[str, Any]]:
+    try:
+        mod = importlib.import_module("vmtk.vmtkscripts")
+    except Exception as exc:
+        raise Step2RequiresReview(
+            "VMTK branch tooling is required for STEP2 but could not be imported. "
+            "Expected vmtk.vmtkscripts with vmtkBranchExtractor and vmtkBranchClipper."
+        ) from exc
+    missing = [name for name in _VMTK_REQUIRED_SCRIPT_CLASSES if not hasattr(mod, name)]
+    if missing:
+        raise Step2RequiresReview("VMTK branch tooling is missing required script class(es): " + ", ".join(missing))
+    return mod, {
+        "vmtk_import_source": "vmtk.vmtkscripts",
+        "vmtk_python": str(Path(sys.executable).resolve()),
+        "vmtk_reexec_active": os.environ.get(_STEP2_VMTK_REEXEC_ENV) == "1",
+    }
 
 
 @dataclass
@@ -71,9 +205,10 @@ class SegmentBoundaryProfile:
     confidence: float
     method: str
     attempts: list[Dict[str, Any]] = field(default_factory=list)
+    loop_points: Optional[np.ndarray] = None
 
     def to_contract(self) -> Dict[str, Any]:
-        return {
+        row = {
             "source_type": self.source_type,
             "centroid": self.centroid.tolist(),
             "normal": unit(self.normal).tolist(),
@@ -84,9 +219,20 @@ class SegmentBoundaryProfile:
             "arclength": float(self.arclength),
             "confidence": float(self.confidence),
             "method": self.method,
+            "boundary_source": self.source_type,
             "selection_algorithm": PROXIMAL_BOUNDARY_SELECTION_ALGORITHM,
             "attempts": self.attempts,
         }
+        if self.loop_points is not None:
+            row.update(
+                {
+                    "cut_method": "surface_plane_intersection_loop",
+                    "cut_loop_point_count": int(np.asarray(self.loop_points).shape[0]),
+                    "loop_area": float(self.area),
+                    "mesh_partition_algorithm": MESH_PARTITION_ALGORITHM,
+                }
+            )
+        return row
 
 
 @dataclass
@@ -103,11 +249,17 @@ class GeometrySegment:
     terminal_face_id: Optional[int] = None
     terminal_face_name: Optional[str] = None
     descendant_terminal_names: list[str] = field(default_factory=list)
+    tunnel_source_outlets: list[str] = field(default_factory=list)
+    parent_junction_node_id: Optional[int] = None
+    distal_junction_node_ids: list[int] = field(default_factory=list)
+    outlet_route_node_paths: dict[str, list[int]] = field(default_factory=dict)
+    vmtk_group_ids: list[int] = field(default_factory=list)
     cell_count: int = 0
     fallback_cell_count: int = 0
     proximal_boundary: Optional[SegmentBoundaryProfile] = None
     proximal_boundary_attempts: list[Dict[str, Any]] = field(default_factory=list)
     proximal_boundary_warning: Optional[str] = None
+    distal_boundaries: list[SegmentBoundaryProfile] = field(default_factory=list)
 
     @property
     def length(self) -> float:
@@ -152,6 +304,13 @@ def _find_face_id_by_name(face_map: Dict[int, Dict[str, Any]], name: str) -> Opt
         if str(row.get("name", "")).strip().lower() == target:
             return int(face_id)
     return None
+
+
+def _validate_expected_anatomy(face_map: Dict[int, Dict[str, Any]]) -> None:
+    present = {str(row.get("name", "")).strip().lower() for row in face_map.values()}
+    missing = sorted(EXPECTED_ANATOMY_NAMES - present)
+    if missing:
+        raise Step2Failure("Face map is missing required anatomy entries: " + ", ".join(missing))
 
 
 def _read_network_edges(network_pd: vtk.vtkPolyData) -> tuple[dict[int, NetworkEdge], dict[int, np.ndarray]]:
@@ -378,6 +537,37 @@ def _resolve_aortic_bifurcation_node(
     return bif_node, detail
 
 
+def _build_outlet_routes(
+    face_map: Dict[int, Dict[str, Any]],
+    face_node_map: Dict[int, Dict[str, Any]],
+    graph: dict[int, dict[int, tuple[float, int]]],
+    root_node: int,
+) -> dict[str, dict[str, Any]]:
+    _, prev = _dijkstra(graph, root_node)
+    routes: dict[str, dict[str, Any]] = {}
+    for face_id, row in sorted(face_node_map.items()):
+        face_name = _face_name(face_map, int(face_id))
+        if face_name == "abdominal_aorta_inlet":
+            continue
+        terminal_node = int(row["terminal_node_id"])
+        node_path = _path_to_root(prev, root_node, terminal_node)
+        if not node_path:
+            raise Step2Failure(f"Outlet tunnel cannot be resolved: no route from inlet to {face_name}.")
+        edge_ids = [_edge_for_nodes(graph, a, b) for a, b in zip(node_path[:-1], node_path[1:])]
+        routes[face_name] = {
+            "face_id": int(face_id),
+            "terminal_node_id": terminal_node,
+            "node_path": [int(v) for v in node_path],
+            "edge_ids": [int(v) for v in edge_ids],
+        }
+
+    required_outlets = sorted(EXPECTED_ANATOMY_NAMES - {"abdominal_aorta_inlet"})
+    missing_routes = [name for name in required_outlets if name not in routes]
+    if missing_routes:
+        raise Step2Failure("STEP1 metadata is missing required outlet tunnel routes: " + ", ".join(missing_routes))
+    return routes
+
+
 def _collect_descendant_terminal_names(
     node: int,
     child_map: dict[int, list[int]],
@@ -423,6 +613,7 @@ def _build_segments(
     edges: dict[int, NetworkEdge],
     face_map: Dict[int, Dict[str, Any]],
     face_node_map: Dict[int, Dict[str, Any]],
+    outlet_routes: dict[str, dict[str, Any]],
 ) -> tuple[list[GeometrySegment], list[int]]:
     dist, prev = _dijkstra(graph, root_node)
     aorta_node_path = _path_to_root(prev, root_node, bif_node)
@@ -448,6 +639,11 @@ def _build_segments(
         for face_id, row in face_node_map.items()
         if int(face_id) in face_map
     }
+    edge_to_outlet_names: dict[int, list[str]] = {}
+    for outlet_name, route in outlet_routes.items():
+        for edge_id in route.get("edge_ids", []):
+            edge_to_outlet_names.setdefault(int(edge_id), []).append(str(outlet_name))
+    all_outlet_names = sorted(outlet_routes.keys())
 
     segments: list[GeometrySegment] = [
         GeometrySegment(
@@ -459,7 +655,11 @@ def _build_segments(
             edge_ids=list(aorta_edge_ids),
             points=aorta_points,
             parent_segment_id=None,
-            descendant_terminal_names=_collect_descendant_terminal_names(bif_node, child_map, terminal_node_to_face, face_map),
+            descendant_terminal_names=all_outlet_names,
+            tunnel_source_outlets=all_outlet_names,
+            parent_junction_node_id=None,
+            distal_junction_node_ids=[int(bif_node)],
+            outlet_route_node_paths={name: list(route["node_path"]) for name, route in outlet_routes.items()},
         )
     ]
     edge_to_segment: dict[int, int] = {int(edge_id): 1 for edge_id in aorta_edge_ids}
@@ -476,6 +676,7 @@ def _build_segments(
         terminal_face_id = terminal_node_to_face.get(int(child))
         terminal_face_name = _face_name(face_map, terminal_face_id) if terminal_face_id is not None else None
         descendants = _collect_descendant_terminal_names(child, child_map, terminal_node_to_face, face_map)
+        tunnel_outlets = sorted(edge_to_outlet_names.get(int(edge_id), descendants))
         if int(parent) in set(aorta_node_path):
             parent_segment_id = 1
         else:
@@ -494,6 +695,14 @@ def _build_segments(
             terminal_face_id=terminal_face_id,
             terminal_face_name=terminal_face_name,
             descendant_terminal_names=descendants,
+            tunnel_source_outlets=tunnel_outlets,
+            parent_junction_node_id=int(parent),
+            distal_junction_node_ids=[int(v) for v in child_map.get(int(child), [])],
+            outlet_route_node_paths={
+                name: list(outlet_routes[name]["node_path"])
+                for name in tunnel_outlets
+                if name in outlet_routes
+            },
         )
         segments.append(segment)
         edge_to_segment[int(edge_id)] = int(next_segment_id)
@@ -507,11 +716,454 @@ def _build_segments(
     return segments, aorta_node_path
 
 
+@dataclass
+class VmtkBranchSegmentation:
+    surface: vtk.vtkPolyData
+    split_centerlines: vtk.vtkPolyData
+    group_to_segment_id: dict[int, int]
+    group_to_descendant_names: dict[int, list[str]]
+    cell_group_ids: np.ndarray
+    clipping_cell_values: np.ndarray
+    diagnostics: Dict[str, Any]
+
+
+def _face_id_from_step1_source(source: str) -> Optional[int]:
+    marker = "ModelFaceID:"
+    if marker not in str(source):
+        return None
+    tail = str(source).split(marker, 1)[1]
+    digits = []
+    for char in tail:
+        if char.isdigit():
+            digits.append(char)
+            continue
+        break
+    if not digits:
+        return None
+    return int("".join(digits))
+
+
+def _path_id_to_terminal_name(step1_metadata: Dict[str, Any], face_map: Dict[int, Dict[str, Any]]) -> dict[int, str]:
+    out: dict[int, str] = {}
+    for raw_path in step1_metadata.get("centerline_extraction", {}).get("raw_paths", []):
+        path_id = raw_path.get("path_id")
+        face_id = _face_id_from_step1_source(str(raw_path.get("termination_source", "")))
+        if path_id is None or face_id is None:
+            continue
+        if int(face_id) not in face_map:
+            continue
+        name = _face_name(face_map, int(face_id))
+        if name == "abdominal_aorta_inlet":
+            continue
+        out[int(path_id)] = str(name)
+    if not out:
+        raise Step2RequiresReview("STEP1 raw centerline metadata does not map VMTK PathId values to named outlet faces.")
+    return out
+
+
+def _vmtk_group_descendants(
+    split_centerlines: vtk.vtkPolyData,
+    path_to_terminal_name: dict[int, str],
+) -> dict[int, list[str]]:
+    cd = split_centerlines.GetCellData()
+    group_arr = cd.GetArray("GroupIds")
+    path_arr = cd.GetArray("PathId")
+    blanking_arr = cd.GetArray("Blanking")
+    if group_arr is None or path_arr is None:
+        raise Step2RequiresReview("VMTK branch extractor output is missing GroupIds or PathId arrays.")
+
+    group_desc: dict[int, set[str]] = {}
+    for cell_id in range(split_centerlines.GetNumberOfCells()):
+        blanking = int(round(blanking_arr.GetTuple1(cell_id))) if blanking_arr is not None else 0
+        if blanking != 0:
+            continue
+        path_id = int(round(path_arr.GetTuple1(cell_id)))
+        terminal_name = path_to_terminal_name.get(path_id)
+        if terminal_name is None:
+            continue
+        group_id = int(round(group_arr.GetTuple1(cell_id)))
+        group_desc.setdefault(group_id, set()).add(str(terminal_name))
+    if not group_desc:
+        raise Step2RequiresReview("VMTK branch extractor produced no nonblank outlet-descendant groups.")
+    return {int(group_id): sorted(names) for group_id, names in sorted(group_desc.items())}
+
+
+def _cell_values_from_point_array(surface: vtk.vtkPolyData, array_name: str) -> tuple[np.ndarray, int]:
+    arr = surface.GetPointData().GetArray(array_name)
+    if arr is None:
+        raise Step2RequiresReview(f"VMTK branch clipper output is missing point array {array_name}.")
+    values = np.zeros((surface.GetNumberOfCells(),), dtype=np.int32)
+    mixed = 0
+    ids = vtk.vtkIdList()
+    for cell_id in range(surface.GetNumberOfCells()):
+        surface.GetCellPoints(cell_id, ids)
+        cell_values = [int(round(arr.GetTuple1(ids.GetId(idx)))) for idx in range(ids.GetNumberOfIds())]
+        if not cell_values:
+            continue
+        counts = Counter(cell_values)
+        if len(counts) > 1:
+            mixed += 1
+        values[cell_id] = int(counts.most_common(1)[0][0])
+    return values, int(mixed)
+
+
+def _cell_values_from_optional_point_array(surface: vtk.vtkPolyData, array_name: str) -> np.ndarray:
+    arr = surface.GetPointData().GetArray(array_name)
+    if arr is None:
+        return np.zeros((surface.GetNumberOfCells(),), dtype=np.int32)
+    values = np.zeros((surface.GetNumberOfCells(),), dtype=np.int32)
+    ids = vtk.vtkIdList()
+    for cell_id in range(surface.GetNumberOfCells()):
+        surface.GetCellPoints(cell_id, ids)
+        if ids.GetNumberOfIds() <= 0:
+            continue
+        values[cell_id] = int(round(arr.GetTuple1(ids.GetId(0))))
+    return values
+
+
+def _map_vmtk_groups_to_segments(
+    group_descendants: dict[int, list[str]],
+    segments: list[GeometrySegment],
+) -> dict[int, int]:
+    descendant_key_to_segment: dict[tuple[str, ...], int] = {}
+    for segment in segments:
+        if segment.segment_type == "aorta_trunk":
+            continue
+        key = tuple(sorted(str(name) for name in segment.descendant_terminal_names))
+        if key:
+            descendant_key_to_segment[key] = int(segment.segment_id)
+
+    group_to_segment: dict[int, int] = {}
+    for group_id, descendant_names in sorted(group_descendants.items()):
+        key = tuple(sorted(str(name) for name in descendant_names))
+        group_to_segment[int(group_id)] = int(descendant_key_to_segment.get(key, 1))
+    return group_to_segment
+
+
+def _terminal_face_group_confidence(
+    clipped_surface: vtk.vtkPolyData,
+    cell_group_ids: np.ndarray,
+    group_to_segment_id: dict[int, int],
+    segments: list[GeometrySegment],
+) -> dict[str, Any]:
+    model_face = get_cell_array(clipped_surface, "ModelFaceID")
+    if model_face is None:
+        raise Step2RequiresReview("VMTK clipped surface is missing ModelFaceID, so terminal groups cannot be validated.")
+    model_face_int = model_face.astype(int)
+    rows: list[Dict[str, Any]] = []
+    worst_confidence = 1.0
+    for segment in segments:
+        if segment.terminal_face_id is None:
+            continue
+        face_cells = np.flatnonzero(model_face_int == int(segment.terminal_face_id))
+        segment_groups = sorted(
+            int(group_id)
+            for group_id, mapped_segment_id in group_to_segment_id.items()
+            if int(mapped_segment_id) == int(segment.segment_id)
+        )
+        if face_cells.size == 0 or not segment_groups:
+            confidence = 0.0
+            dominant_group_id = None
+            dominant_count = 0
+        else:
+            counts = Counter(int(cell_group_ids[cell_id]) for cell_id in face_cells.tolist())
+            dominant_group_id, dominant_count = counts.most_common(1)[0]
+            matching = sum(count for group_id, count in counts.items() if int(group_id) in segment_groups)
+            confidence = float(matching / max(1, int(face_cells.size)))
+        worst_confidence = min(worst_confidence, confidence)
+        rows.append(
+            {
+                "segment_id": int(segment.segment_id),
+                "segment_name": str(segment.name_hint),
+                "terminal_face_id": int(segment.terminal_face_id),
+                "vmtk_group_ids": segment_groups,
+                "dominant_terminal_face_group_id": dominant_group_id,
+                "dominant_terminal_face_group_cell_count": int(dominant_count),
+                "terminal_face_cell_count": int(face_cells.size),
+                "confidence": float(confidence),
+            }
+        )
+    low = [row for row in rows if float(row["confidence"]) < 0.90]
+    if low:
+        names = ", ".join(f"{row['segment_name']}={row['confidence']:.2f}" for row in low)
+        raise Step2RequiresReview("VMTK terminal face-to-group mapping confidence is too low: " + names)
+    return {
+        "terminal_face_group_mappings": rows,
+        "terminal_face_group_min_confidence": float(worst_confidence),
+    }
+
+
+def _assign_vmtk_boundary_profiles(segments: list[GeometrySegment], group_to_segment_id: dict[int, int]) -> None:
+    group_ids_by_segment: dict[int, list[int]] = {}
+    for group_id, segment_id in group_to_segment_id.items():
+        group_ids_by_segment.setdefault(int(segment_id), []).append(int(group_id))
+    for segment in segments:
+        segment.vmtk_group_ids = sorted(group_ids_by_segment.get(int(segment.segment_id), []))
+        if segment.segment_type == "aorta_trunk":
+            continue
+        origin = segment.points[0] if segment.points.shape[0] else np.zeros(3, dtype=float)
+        normal = tangent_at_arclength(segment.points, 0.0, window=0.75) if segment.points.shape[0] >= 2 else np.zeros(3)
+        segment.proximal_boundary = SegmentBoundaryProfile(
+            source_type="vmtk_branch_clip",
+            centroid=np.asarray(origin, dtype=float),
+            normal=unit(normal),
+            area=0.0,
+            equivalent_diameter=None,
+            major_diameter=None,
+            minor_diameter=None,
+            arclength=0.0,
+            confidence=0.95,
+            method=PROXIMAL_BOUNDARY_SELECTION_ALGORITHM,
+            attempts=[
+                {
+                    "source": "vmtkBranchClipper",
+                    "vmtk_group_ids": [int(v) for v in segment.vmtk_group_ids],
+                    "selected_reason": "authoritative_vmtk_branch_group_boundary",
+                }
+            ],
+            loop_points=None,
+        )
+
+
+def _run_vmtk_branch_group_segmentation(
+    *,
+    surface: vtk.vtkPolyData,
+    raw_centerlines: vtk.vtkPolyData,
+    step1_metadata: Dict[str, Any],
+    face_map: Dict[int, Dict[str, Any]],
+    segments: list[GeometrySegment],
+) -> VmtkBranchSegmentation:
+    vmtkscripts, runtime_info = _import_vmtk_scripts()
+
+    extractor = vmtkscripts.vmtkBranchExtractor()
+    extractor.Centerlines = raw_centerlines
+    extractor.Execute()
+    split_centerlines = extractor.Centerlines
+    if split_centerlines is None or split_centerlines.GetNumberOfCells() <= 0:
+        raise Step2RequiresReview("VMTK branch extractor returned empty centerlines.")
+
+    clipper = vmtkscripts.vmtkBranchClipper()
+    clipper.Surface = surface
+    clipper.Centerlines = split_centerlines
+    clipper.Interactive = 0
+    clipper.Execute()
+    clipped_surface = clipper.Surface
+    if clipped_surface is None or clipped_surface.GetNumberOfCells() <= 0:
+        raise Step2RequiresReview("VMTK branch clipper returned an empty surface.")
+
+    cell_group_ids, mixed_group_cells = _cell_values_from_point_array(clipped_surface, "GroupIds")
+    mixed_threshold = max(25, int(math.ceil(0.001 * max(1, clipped_surface.GetNumberOfCells()))))
+    if mixed_group_cells > mixed_threshold:
+        raise Step2RequiresReview(
+            f"VMTK branch clipper produced {mixed_group_cells} mixed group cells, above threshold {mixed_threshold}."
+        )
+
+    path_to_name = _path_id_to_terminal_name(step1_metadata, face_map)
+    group_descendants = _vmtk_group_descendants(split_centerlines, path_to_name)
+    group_to_segment_id = _map_vmtk_groups_to_segments(group_descendants, segments)
+    surface_groups = sorted(set(int(v) for v in cell_group_ids.tolist()))
+    unmapped_surface_groups = [group_id for group_id in surface_groups if group_id not in group_to_segment_id]
+    if unmapped_surface_groups:
+        raise Step2RequiresReview("VMTK clipped surface has unmapped GroupIds: " + ", ".join(str(v) for v in unmapped_surface_groups))
+
+    _assign_vmtk_boundary_profiles(segments, group_to_segment_id)
+    terminal_mapping = _terminal_face_group_confidence(clipped_surface, cell_group_ids, group_to_segment_id, segments)
+    clipping_values = _cell_values_from_optional_point_array(clipped_surface, "ClippingArray")
+
+    return VmtkBranchSegmentation(
+        surface=clipped_surface,
+        split_centerlines=split_centerlines,
+        group_to_segment_id=group_to_segment_id,
+        group_to_descendant_names=group_descendants,
+        cell_group_ids=cell_group_ids,
+        clipping_cell_values=clipping_values,
+        diagnostics={
+            **runtime_info,
+            **terminal_mapping,
+            "vmtk_branch_extractor_group_count": int(len(group_descendants)),
+            "vmtk_clipped_surface_group_count": int(len(surface_groups)),
+            "vmtk_mixed_group_cells": int(mixed_group_cells),
+            "vmtk_mixed_group_cell_threshold": int(mixed_threshold),
+            "vmtk_group_to_segment_id": {str(group_id): int(segment_id) for group_id, segment_id in sorted(group_to_segment_id.items())},
+            "vmtk_group_descendant_names": {str(group_id): list(names) for group_id, names in sorted(group_descendants.items())},
+            "vmtk_branch_clipper_input_cells": int(surface.GetNumberOfCells()),
+            "vmtk_branch_clipper_output_cells": int(clipped_surface.GetNumberOfCells()),
+        },
+    )
+
+
+def _assign_surface_cells_from_vmtk(
+    surface: vtk.vtkPolyData,
+    segments: list[GeometrySegment],
+    vmtk_result: VmtkBranchSegmentation,
+) -> tuple[np.ndarray, Dict[str, int], Dict[int, int], Dict[str, np.ndarray]]:
+    n_cells = int(surface.GetNumberOfCells())
+    labels = np.zeros((n_cells,), dtype=np.int32)
+    unmapped = 0
+    for cell_id, group_id in enumerate(vmtk_result.cell_group_ids.tolist()):
+        segment_id = int(vmtk_result.group_to_segment_id.get(int(group_id), 0))
+        if segment_id <= 0:
+            unmapped += 1
+        labels[cell_id] = segment_id
+    if unmapped:
+        raise Step2RequiresReview(f"VMTK group assignment left {unmapped} clipped surface cells unmapped.")
+
+    assignment_mode = np.full((n_cells,), 10, dtype=np.int32)
+    adjacency = _surface_cell_adjacency(surface)
+    model_face = get_cell_array(surface, "ModelFaceID")
+    branch_owner_id = np.where(labels > 1, labels, 0).astype(np.int32)
+    original_labels = labels.copy()
+    island_counts, island_debug = _reject_orphan_branch_components(
+        labels,
+        assignment_mode,
+        adjacency,
+        branch_owner_id,
+        model_face,
+        segments,
+    )
+
+    # Footprint rescue: VMTK cut planes can include aorta-wall cells just
+    # proximal to an ostium in a branch group. Re-run _branch_origin_allowed_mask
+    # (strict=True) on every branch-labeled cell; anything that fails the
+    # footprint/parent-competition check is relabeled to aorta.
+    centers = cell_centers(surface)
+    distance_by_segment, arclength_by_segment, radius_by_segment, _ = _precompute_segment_projections(
+        centers, segments
+    )
+    terminal_face_mask = np.zeros((n_cells,), dtype=bool)
+    if model_face is not None:
+        model_face_int = model_face.astype(int)
+        for seg in segments:
+            if seg.terminal_face_id is not None:
+                terminal_face_mask |= model_face_int == int(seg.terminal_face_id)
+    aorta_id = int(next(s.segment_id for s in segments if s.segment_type == "aorta_trunk"))
+    aorta_radius = max(float(radius_by_segment.get(aorta_id, 1.0)), 0.45)
+    branch_parent_wall_before_rescue = 0
+    for segment in segments:
+        if segment.segment_type == "aorta_trunk":
+            continue
+        seg_id = int(segment.segment_id)
+        radius = max(float(radius_by_segment.get(seg_id, 1.0)), 0.45)
+        branch_cells = np.flatnonzero((labels == seg_id) & ~terminal_face_mask)
+        if branch_cells.size == 0:
+            continue
+        child_score = distance_by_segment[seg_id][branch_cells] / radius
+        parent_score = distance_by_segment[aorta_id][branch_cells] / aorta_radius
+        # Primary: fails the origin-allowed mask, but only if the cell is NOT in
+        # the branch core (child_score guard stops over-rescuing cells at the
+        # branch base whose signed value is slightly behind the proximal boundary).
+        allowed = _branch_origin_allowed_mask(
+            centers,
+            branch_cells,
+            segment,
+            radius,
+            distance_by_segment[seg_id],
+            arclength_by_segment[seg_id],
+            distance_by_segment,
+            radius_by_segment,
+            strict=True,
+        )
+        mask_rescue = ~allowed & (child_score > 0.80)
+        # Secondary: cell is on the aorta surface AND closer to the aorta centerline
+        # than to the branch (normalized). Catches aorta-wall cells outside the
+        # near_origin zone that VMTK's Voronoi over-assigned to a branch.
+        # parent_score < 1.20 keeps us near the aorta surface (within 3.6cm for
+        # the hardcoded aorta radius 3.0). child_score > 0.75 avoids rescuing
+        # legitimate branch lumen cells very close to the branch centerline.
+        aorta_wall_rescue = (parent_score < 1.20) & (child_score > 0.75)
+        leak_cells = branch_cells[mask_rescue | aorta_wall_rescue]
+        branch_parent_wall_before_rescue += int(leak_cells.size)
+        if leak_cells.size:
+            labels[leak_cells] = 1
+            assignment_mode[leak_cells] = 11
+
+    branch_group_aorta_labels = int(np.count_nonzero((original_labels > 1) & (labels == 1)))
+    aorta_group_branch_labels = int(np.count_nonzero((original_labels == 1) & (labels > 1)))
+    counts = {int(seg.segment_id): int(np.count_nonzero(labels == int(seg.segment_id))) for seg in segments}
+    for segment in segments:
+        segment.cell_count = counts.get(int(segment.segment_id), 0)
+        segment.fallback_cell_count = 0
+
+    group_counts = Counter(int(v) for v in vmtk_result.cell_group_ids.tolist())
+    assignment_counts: Dict[str, int] = {
+        SURFACE_ASSIGNMENT_ALGORITHM: 1,
+        "fallback": 0,
+        "fallback_assigned_cells": 0,
+        "vmtk_branch_group_assigned_cells": int(np.count_nonzero(labels > 0)),
+        "vmtk_group_count": int(len(group_counts)),
+        "vmtk_mixed_group_cells": int(vmtk_result.diagnostics.get("vmtk_mixed_group_cells", 0)),
+        "vmtk_branch_extractor_group_count": int(vmtk_result.diagnostics.get("vmtk_branch_extractor_group_count", 0)),
+        "vmtk_clipped_surface_group_count": int(vmtk_result.diagnostics.get("vmtk_clipped_surface_group_count", 0)),
+        "branch_groups_labeled_as_aorta": int(branch_group_aorta_labels),
+        "aorta_groups_labeled_as_branch": int(aorta_group_branch_labels),
+        "branch_owned_aorta_labeled_cells": int(branch_group_aorta_labels),
+        "branch_labeled_parent_aorta_wall_before_rescue": int(branch_parent_wall_before_rescue),
+        "branch_labeled_parent_aorta_wall_cells": int(aorta_group_branch_labels),
+        "vmtk_terminal_face_group_min_confidence_x1000": int(
+            round(1000.0 * float(vmtk_result.diagnostics.get("terminal_face_group_min_confidence", 0.0)))
+        ),
+        "mesh_partition_input_cells": int(vmtk_result.diagnostics.get("vmtk_branch_clipper_input_cells", 0)),
+        "mesh_partition_output_cells": int(vmtk_result.diagnostics.get("vmtk_branch_clipper_output_cells", n_cells)),
+        "mesh_partition_authored_cuts": int(len(vmtk_result.group_to_segment_id)),
+        "mesh_partition_skipped_cuts": 0,
+        **island_counts,
+    }
+    for group_id, count in sorted(group_counts.items()):
+        assignment_counts[f"vmtk_group_{int(group_id)}_cells"] = int(count)
+    for segment in segments:
+        assignment_counts[f"seed_segment_{int(segment.segment_id)}"] = int(segment.cell_count)
+    assignment_counts["seed_count_total"] = int(sum(segment.cell_count for segment in segments))
+
+    diagnostics = {
+        "AssignmentMode": assignment_mode,
+        "VmtkGroupId": vmtk_result.cell_group_ids.astype(np.int32),
+        "VmtkClippingArray": vmtk_result.clipping_cell_values.astype(np.int32),
+        "VmtkOriginalSegmentId": original_labels.astype(np.int32),
+        **island_debug,
+    }
+    return labels, assignment_counts, counts, diagnostics
+
+
 def _cell_area_and_centroid(surface: vtk.vtkPolyData, cell_id: int) -> tuple[float, np.ndarray]:
     pts = cell_points(surface, int(cell_id))
     area = triangle_area(pts)
     centroid = np.mean(pts, axis=0) if pts.shape[0] else np.zeros(3, dtype=float)
     return float(area), centroid
+
+
+def _safe_projected_major_minor_diameters(points: np.ndarray, normal_hint: Optional[np.ndarray] = None) -> tuple[Optional[float], Optional[float]]:
+    pts = np.asarray(points, dtype=float)
+    if pts.shape[0] < 3:
+        return None, None
+    center = np.mean(pts, axis=0)
+    normal = np.asarray(normal_hint, dtype=float) if normal_hint is not None else np.zeros(3, dtype=float)
+    if float(np.linalg.norm(normal)) <= 1.0e-12:
+        _, normal, _ = polygon_area_normal(pts)
+    normal = unit(normal)
+    if float(np.linalg.norm(normal)) <= 1.0e-12:
+        return None, None
+    reference = np.asarray([1.0, 0.0, 0.0], dtype=float)
+    if abs(float(np.dot(normal, reference))) > 0.90:
+        reference = np.asarray([0.0, 1.0, 0.0], dtype=float)
+    u = unit(np.cross(normal, reference))
+    v = unit(np.cross(normal, u))
+    if float(np.linalg.norm(u)) <= 1.0e-12 or float(np.linalg.norm(v)) <= 1.0e-12:
+        return None, None
+    x_values: list[float] = []
+    y_values: list[float] = []
+    for point in pts.tolist():
+        dx = float(point[0]) - float(center[0])
+        dy = float(point[1]) - float(center[1])
+        dz = float(point[2]) - float(center[2])
+        x_values.append(dx * float(u[0]) + dy * float(u[1]) + dz * float(u[2]))
+        y_values.append(dx * float(v[0]) + dy * float(v[1]) + dz * float(v[2]))
+    x_extent = max(x_values) - min(x_values)
+    y_extent = max(y_values) - min(y_values)
+    major = float(max(x_extent, y_extent))
+    minor = float(min(x_extent, y_extent))
+    if not math.isfinite(major) or not math.isfinite(minor):
+        return None, None
+    return major, minor
 
 
 def _face_region_profile(
@@ -546,7 +1198,7 @@ def _face_region_profile(
     normal = np.asarray(metadata_term.get("normal"), dtype=float) if metadata_term and metadata_term.get("normal") is not None else np.zeros(3)
     if np.linalg.norm(normal) <= 1.0e-12 and pts.shape[0] >= 3:
         _, normal, _ = polygon_area_normal(pts)
-    major, minor = projected_major_minor_diameters(pts, normal_hint=normal)
+    major, minor = _safe_projected_major_minor_diameters(pts, normal_hint=normal)
     eq = equivalent_diameter_from_area(total_area)
     confidence = 0.95 if metadata_term else 0.85
     return {
@@ -605,7 +1257,7 @@ def _contour_profiles_from_plane(
         if area <= 1.0e-8:
             continue
         centroid = np.mean(pts, axis=0)
-        major, minor = projected_major_minor_diameters(pts, normal_hint=n)
+        major, minor = _safe_projected_major_minor_diameters(pts, normal_hint=n)
         profiles.append(
             {
                 "cell_id": int(cell_id),
@@ -765,10 +1417,10 @@ def _extract_branch_proximal_boundary(
     if segment.segment_type == "aorta_trunk" or length <= 1.0e-6:
         return None
 
-    offsets = [0.1 * idx for idx in range(1, 51)]
+    offsets = [0.0, 0.03, 0.06, 0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
     valid_offsets = [offset for offset in offsets if offset < max(0.0, length - 0.1)]
     if not valid_offsets:
-        valid_offsets = [min(0.25, 0.5 * length)]
+        valid_offsets = [0.0]
 
     attempts: list[Dict[str, Any]] = []
     accepted_candidates: list[Dict[str, Any]] = []
@@ -882,7 +1534,7 @@ def _extract_branch_proximal_boundary(
             confidence = min(confidence, 0.78)
 
         boundary = SegmentBoundaryProfile(
-            source_type="surface_ostium_plane_cut",
+            source_type="parent_junction_surface_cut",
             centroid=np.asarray(selected["centroid"], dtype=float),
             normal=unit(tangent),
             area=float(selected["area"]),
@@ -893,6 +1545,7 @@ def _extract_branch_proximal_boundary(
             confidence=float(confidence),
             method=PROXIMAL_BOUNDARY_SELECTION_ALGORITHM,
             attempts=[],
+            loop_points=np.asarray(selected["points"], dtype=float),
         )
         accepted_candidates.append(
             {
@@ -955,7 +1608,6 @@ def _extract_branch_proximal_boundary(
         selected_reason = "earliest_strong_candidate_no_stable_run" if strong_candidates else "earliest_candidate_no_stable_run"
         attempts[int(selected_candidate["attempt_index"])]["selected_reason"] = selected_reason
         boundary = selected_candidate["boundary"]
-        boundary.confidence = float(min(float(boundary.confidence), 0.68))
     elif selected_candidate is not None:
         boundary = selected_candidate["boundary"]
     else:
@@ -965,6 +1617,58 @@ def _extract_branch_proximal_boundary(
     attempts[int(selected_candidate["attempt_index"])]["selected_reason"] = selected_reason
     boundary.attempts = attempts
     return boundary
+
+
+def _extract_tunnel_boundary_at_arclength(
+    surface: vtk.vtkPolyData,
+    segment: GeometrySegment,
+    arclength: float,
+    source_type: str,
+) -> Optional[SegmentBoundaryProfile]:
+    if segment.points.shape[0] < 2:
+        return None
+    length = float(segment.length)
+    s = float(np.clip(arclength, 0.0, length))
+    origin = point_at_arclength(segment.points, s)
+    tangent = tangent_at_arclength(segment.points, s, window=0.75)
+    profiles = _contour_profiles_from_plane(surface, origin, tangent)
+    attempt = {
+        "offset_mm": float(s),
+        "candidate_count": int(len(profiles)),
+        "selected_reason": None,
+    }
+    if not profiles:
+        return None
+    ranked = []
+    for profile in profiles:
+        centroid = np.asarray(profile["centroid"], dtype=float)
+        centroid_distance, _, _ = _project_point_to_polyline(centroid, segment.points)
+        origin_distance = distance(centroid, origin)
+        ranked.append((float(origin_distance + 0.5 * centroid_distance), profile, origin_distance, centroid_distance))
+    _, selected, origin_distance, centroid_distance = min(ranked, key=lambda item: item[0])
+    attempt.update(
+        {
+            "selected_reason": "closest_loop_to_tunnel_junction",
+            "origin_distance": float(origin_distance),
+            "centroid_distance": float(centroid_distance),
+            "selected_candidate_area": float(selected["area"]),
+            "selected_candidate_equivalent_diameter": selected["equivalent_diameter"],
+        }
+    )
+    return SegmentBoundaryProfile(
+        source_type=source_type,
+        centroid=np.asarray(selected["centroid"], dtype=float),
+        normal=unit(tangent),
+        area=float(selected["area"]),
+        equivalent_diameter=selected["equivalent_diameter"],
+        major_diameter=selected["major_diameter"],
+        minor_diameter=selected["minor_diameter"],
+        arclength=float(s),
+        confidence=0.82,
+        method=PROXIMAL_BOUNDARY_SELECTION_ALGORITHM,
+        attempts=[attempt],
+        loop_points=np.asarray(selected["points"], dtype=float),
+    )
 
 
 def _refine_branch_boundaries(
@@ -983,6 +1687,8 @@ def _refine_branch_boundaries(
             expected_area=float(terminal["area"]) if terminal.get("area") is not None else None,
             expected_diameter=float(terminal["diameter_eq"]) if terminal.get("diameter_eq") is not None else None,
         )
+        if boundary is not None:
+            boundary.source_type = "parent_junction_derived_surface_opening_cut"
         if boundary is None:
             warning = (
                 f"W_STEP2_PROXIMAL_BOUNDARY_UNRESOLVED: segment {segment.segment_id} "
@@ -1000,6 +1706,15 @@ def _refine_branch_boundaries(
             warnings.append(warning)
         segment.proximal_boundary = boundary
         segment.proximal_boundary_attempts = boundary.attempts
+        if segment.segment_type == "topology_branch" and segment.distal_junction_node_ids:
+            distal_boundary = _extract_tunnel_boundary_at_arclength(
+                surface,
+                segment,
+                float(segment.length),
+                "distal_child_junction_surface_cut",
+            )
+            if distal_boundary is not None:
+                segment.distal_boundaries = [distal_boundary]
     return warnings
 
 
@@ -1030,12 +1745,15 @@ def _cleanup_small_label_islands(
     protected_face_ids: set[int],
     assignment_mode: np.ndarray,
     *,
+    protected_cells: Optional[np.ndarray] = None,
     max_island_cells: int = 20,
 ) -> Dict[str, int]:
     model_face = get_cell_array(surface, "ModelFaceID")
     protected = np.zeros((surface.GetNumberOfCells(),), dtype=bool)
     if model_face is not None and protected_face_ids:
         protected = np.isin(model_face.astype(int), list(protected_face_ids))
+    if protected_cells is not None:
+        protected |= np.asarray(protected_cells, dtype=bool)
 
     adjacency = _surface_cell_adjacency(surface)
     visited = np.zeros((surface.GetNumberOfCells(),), dtype=bool)
@@ -1116,6 +1834,118 @@ def _assignment_polyline(segment: GeometrySegment) -> np.ndarray:
     if segment.segment_type != "aorta_trunk" and segment.proximal_boundary is not None:
         return _trim_polyline_from_arclength(points, float(segment.proximal_boundary.arclength))
     return points
+
+
+def _loop_polydata(loop_points: np.ndarray) -> vtk.vtkPolyData:
+    pts_np = np.asarray(loop_points, dtype=float)
+    points = vtk.vtkPoints()
+    lines = vtk.vtkCellArray()
+    if pts_np.shape[0] < 3:
+        out = vtk.vtkPolyData()
+        out.SetPoints(points)
+        out.SetLines(lines)
+        return out
+
+    polyline = vtk.vtkPolyLine()
+    polyline.GetPointIds().SetNumberOfIds(int(pts_np.shape[0]) + 1)
+    for idx, point in enumerate(pts_np):
+        points.InsertNextPoint(float(point[0]), float(point[1]), float(point[2]))
+        polyline.GetPointIds().SetId(int(idx), int(idx))
+    polyline.GetPointIds().SetId(int(pts_np.shape[0]), 0)
+    lines.InsertNextCell(polyline)
+
+    out = vtk.vtkPolyData()
+    out.SetPoints(points)
+    out.SetLines(lines)
+    return out
+
+
+def _build_boundary_loop_debug_polydata(segments: list[GeometrySegment]) -> vtk.vtkPolyData:
+    points = vtk.vtkPoints()
+    lines = vtk.vtkCellArray()
+    segment_ids: list[int] = []
+    for segment in segments:
+        boundaries = [segment.proximal_boundary] + list(segment.distal_boundaries)
+        for boundary in boundaries:
+            if boundary is None or boundary.loop_points is None:
+                continue
+            loop = np.asarray(boundary.loop_points, dtype=float)
+            if loop.shape[0] < 3:
+                continue
+            start_id = points.GetNumberOfPoints()
+            polyline = vtk.vtkPolyLine()
+            polyline.GetPointIds().SetNumberOfIds(int(loop.shape[0]) + 1)
+            for idx, point in enumerate(loop):
+                points.InsertNextPoint(float(point[0]), float(point[1]), float(point[2]))
+                polyline.GetPointIds().SetId(int(idx), int(start_id + idx))
+            polyline.GetPointIds().SetId(int(loop.shape[0]), int(start_id))
+            lines.InsertNextCell(polyline)
+            segment_ids.append(int(segment.segment_id))
+
+    out = vtk.vtkPolyData()
+    out.SetPoints(points)
+    out.SetLines(lines)
+    if segment_ids:
+        add_int_cell_array(out, "SegmentId", segment_ids)
+    return out
+
+
+def _split_surface_by_plane(surface: vtk.vtkPolyData, origin: np.ndarray, normal: np.ndarray) -> vtk.vtkPolyData:
+    plane = vtk.vtkPlane()
+    plane.SetOrigin(float(origin[0]), float(origin[1]), float(origin[2]))
+    n = unit(normal)
+    plane.SetNormal(float(n[0]), float(n[1]), float(n[2]))
+
+    clipper = vtk.vtkClipPolyData()
+    clipper.SetInputData(surface)
+    clipper.SetClipFunction(plane)
+    clipper.GenerateClippedOutputOn()
+    clipper.GenerateClipScalarsOff()
+    clipper.Update()
+
+    append = vtk.vtkAppendPolyData()
+    positive = clipper.GetOutput()
+    negative = clipper.GetClippedOutput()
+    if positive is not None and positive.GetNumberOfCells() > 0:
+        append.AddInputData(positive)
+    if negative is not None and negative.GetNumberOfCells() > 0:
+        append.AddInputData(negative)
+    append.Update()
+
+    out = vtk.vtkPolyData()
+    out.DeepCopy(append.GetOutput())
+    return out
+
+
+def _partition_surface_by_branch_boundaries(
+    surface: vtk.vtkPolyData,
+    segments: list[GeometrySegment],
+) -> tuple[vtk.vtkPolyData, Dict[str, int]]:
+    partitioned = vtk.vtkPolyData()
+    partitioned.DeepCopy(surface)
+    authored_cuts = 0
+    skipped_cuts = 0
+    input_cells = int(surface.GetNumberOfCells())
+
+    for segment in segments:
+        if segment.segment_type == "aorta_trunk":
+            continue
+        for boundary in [segment.proximal_boundary] + list(segment.distal_boundaries):
+            if boundary is None or boundary.loop_points is None:
+                continue
+            loop = np.asarray(boundary.loop_points, dtype=float)
+            if loop.shape[0] < 3:
+                skipped_cuts += 1
+                continue
+            partitioned = _split_surface_by_plane(partitioned, np.asarray(boundary.centroid, dtype=float), np.asarray(boundary.normal, dtype=float))
+            authored_cuts += 1
+
+    return partitioned, {
+        "mesh_partition_input_cells": input_cells,
+        "mesh_partition_output_cells": int(partitioned.GetNumberOfCells()),
+        "mesh_partition_authored_cuts": int(authored_cuts),
+        "mesh_partition_skipped_cuts": int(skipped_cuts),
+    }
 
 
 def _build_ostium_barriers(
@@ -1205,9 +2035,9 @@ def _branch_origin_allowed_mask(
 
     normal = unit(np.asarray(segment.proximal_boundary.normal, dtype=float))
     origin_vectors = centers[candidates] - segment.proximal_boundary.centroid.reshape(1, 3)
-    signed = origin_vectors @ normal
+    signed = (origin_vectors * normal).sum(axis=1)
     radial_vectors = origin_vectors - signed.reshape(-1, 1) * normal.reshape(1, 3)
-    radial_distance = np.linalg.norm(radial_vectors, axis=1)
+    radial_distance = np.sqrt((radial_vectors * radial_vectors).sum(axis=1))
     signed_floor = -max(0.02 * radius, 0.03)
     allowed = signed >= signed_floor
 
@@ -1234,8 +2064,14 @@ def _branch_origin_allowed_mask(
     child_score = distance[candidates] / max(radius, 0.45)
     parent_score = parent_distance[candidates] / parent_radius
     near_origin = (arclength[candidates] <= max(1.50 * radius, 0.90)) | (signed <= max(0.55 * radius, 0.30))
-    parent_margin = 0.38 if strict else 0.28
-    parent_competition_required = near_origin & ~inside_footprint
+    if strict:
+        # Inside-footprint cells still need parent competition, just a smaller margin.
+        # This prevents aorta-wall cells flanking the ostium from getting branch ownership.
+        parent_margin = np.where(inside_footprint, 0.10, 0.38)
+        parent_competition_required = near_origin
+    else:
+        parent_margin = 0.28
+        parent_competition_required = near_origin & ~inside_footprint
     allowed &= (~parent_competition_required) | (child_score + parent_margin < parent_score)
     return allowed
 
@@ -1581,6 +2417,296 @@ def _recover_unassigned_cells(
     return int(missing.size)
 
 
+def _segment_owner_priority(segment: GeometrySegment) -> int:
+    if segment.segment_type == "terminal_branch":
+        return 0
+    if segment.segment_type == "topology_branch":
+        return 1
+    return 2
+
+
+def _connected_component_in_mask(
+    adjacency: list[set[int]],
+    allowed: np.ndarray,
+    seeds: np.ndarray,
+) -> np.ndarray:
+    seed_ids = [int(v) for v in np.asarray(seeds, dtype=np.int32).tolist() if bool(allowed[int(v)])]
+    if not seed_ids:
+        return np.zeros((0,), dtype=np.int32)
+    visited = np.zeros((allowed.shape[0],), dtype=bool)
+    stack = list(dict.fromkeys(seed_ids))
+    for cell_id in stack:
+        visited[int(cell_id)] = True
+    component: list[int] = []
+    while stack:
+        cell_id = int(stack.pop())
+        component.append(cell_id)
+        for nbr_raw in adjacency[cell_id]:
+            nbr = int(nbr_raw)
+            if not visited[nbr] and bool(allowed[nbr]):
+                visited[nbr] = True
+                stack.append(nbr)
+    return np.asarray(component, dtype=np.int32)
+
+
+def _build_branch_tunnel_ownership(
+    centers: np.ndarray,
+    model_face: Optional[np.ndarray],
+    adjacency: list[set[int]],
+    segments: list[GeometrySegment],
+    distance_by_segment: dict[int, np.ndarray],
+    arclength_by_segment: dict[int, np.ndarray],
+    radius_by_segment: dict[int, float],
+) -> tuple[np.ndarray, Dict[str, int], Dict[str, np.ndarray]]:
+    n_cells = int(centers.shape[0])
+    owner_id = np.zeros((n_cells,), dtype=np.int32)
+    owner_score = np.full((n_cells,), np.inf, dtype=float)
+    owner_priority = np.full((n_cells,), 99, dtype=np.int32)
+    tunnel_seed_id = np.zeros((n_cells,), dtype=np.int32)
+    tunnel_candidate_id = np.zeros((n_cells,), dtype=np.int32)
+    tunnel_component_id = np.zeros((n_cells,), dtype=np.int32)
+    overlap_reassignments = 0
+    terminal_priority_wins = 0
+    topology_seed_cells = 0
+    terminal_seed_cells = 0
+    component_claimed_cells = 0
+    empty_candidate_segments = 0
+    missing_seed_segments = 0
+    component_index = 0
+
+    def claim_cells(
+        cell_ids: np.ndarray,
+        segment: GeometrySegment,
+        scores: np.ndarray,
+    ) -> int:
+        nonlocal overlap_reassignments, terminal_priority_wins
+        if cell_ids.size == 0:
+            return 0
+        seg_id = int(segment.segment_id)
+        priority = _segment_owner_priority(segment)
+        current_scores = owner_score[cell_ids]
+        current_priority = owner_priority[cell_ids]
+        current_owner = owner_id[cell_ids]
+        better = scores + 1.0e-9 < current_scores
+        priority_tie = (np.abs(scores - current_scores) <= 0.10) & (priority < current_priority)
+        update = better | priority_tie
+        if not np.any(update):
+            return 0
+
+        updated_cells = cell_ids[update]
+        replaced = current_owner[update] > 0
+        overlap_reassignments += int(np.count_nonzero(replaced))
+        terminal_priority_wins += int(
+            np.count_nonzero(
+                replaced
+                & (segment.segment_type == "terminal_branch")
+                & (priority < current_priority[update])
+            )
+        )
+        owner_id[updated_cells] = seg_id
+        owner_score[updated_cells] = scores[update]
+        owner_priority[updated_cells] = int(priority)
+        return int(updated_cells.size)
+
+    for segment in sorted(segments, key=_segment_owner_priority):
+        if segment.segment_type == "aorta_trunk":
+            continue
+        seg_id = int(segment.segment_id)
+        radius = max(float(radius_by_segment.get(seg_id, 1.0)), 0.45)
+        distance_to_segment = distance_by_segment[seg_id]
+        arclength = arclength_by_segment[seg_id]
+        assignment_points = _assignment_polyline(segment)
+        assignment_length = float(cumulative_arclength(assignment_points)[-1]) if assignment_points.shape[0] >= 2 else 0.0
+        if assignment_points.shape[0] < 2 or assignment_length <= 1.0e-6:
+            continue
+
+        max_s = assignment_length + max(0.25 * radius, 0.12)
+        candidate_radius = max(1.35 * radius + 0.14, 0.64)
+        priority_bias = -0.08 if segment.segment_type == "terminal_branch" else 0.04
+        all_cells = np.arange(n_cells, dtype=np.int32)
+        candidate = _branch_origin_allowed_mask(
+            centers,
+            all_cells,
+            segment,
+            radius,
+            distance_to_segment,
+            arclength,
+            distance_by_segment,
+            radius_by_segment,
+            strict=True,
+        )
+        candidate &= (distance_to_segment <= candidate_radius) & (arclength <= max_s)
+        candidate_ids = np.flatnonzero(candidate)
+        if candidate_ids.size == 0:
+            empty_candidate_segments += 1
+            continue
+        tunnel_candidate_id[candidate & (tunnel_candidate_id == 0)] = seg_id
+
+        seed_mask = np.zeros((n_cells,), dtype=bool)
+        if model_face is not None and segment.terminal_face_id is not None:
+            face_seed = np.flatnonzero(model_face.astype(int) == int(segment.terminal_face_id))
+            if face_seed.size:
+                seed_mask[face_seed] = True
+                terminal_seed_cells += int(face_seed.size)
+        if not np.any(seed_mask):
+            midpoint = 0.50 * assignment_length
+            seed_band = max(0.18 * assignment_length, max(0.75 * radius, 0.35))
+            corridor = candidate & (np.abs(arclength - midpoint) <= seed_band)
+            corridor_ids = np.flatnonzero(corridor)
+            if corridor_ids.size == 0:
+                corridor_ids = candidate_ids
+            reference_distance = float(np.min(distance_to_segment[corridor_ids]))
+            seed_ids = corridor_ids[distance_to_segment[corridor_ids] <= reference_distance + max(0.16 * radius, 0.07)]
+            if seed_ids.size == 0:
+                seed_ids = corridor_ids[np.argsort(distance_to_segment[corridor_ids])[: min(20, int(corridor_ids.size))]]
+            seed_mask[seed_ids] = True
+            topology_seed_cells += int(seed_ids.size)
+
+        seed_ids = np.flatnonzero(seed_mask)
+        tunnel_seed_id[seed_ids] = seg_id
+        component = _connected_component_in_mask(adjacency, candidate | seed_mask, seed_ids)
+        if component.size == 0:
+            missing_seed_segments += 1
+            continue
+        component_index += 1
+        tunnel_component_id[component] = int(component_index)
+        scores = distance_to_segment[component] / radius + priority_bias
+        component_claimed_cells += claim_cells(component, segment, scores)
+
+    return owner_id, {
+        "tunnel_seed_cells": int(np.count_nonzero(tunnel_seed_id > 0)),
+        "tunnel_terminal_seed_cells": int(terminal_seed_cells),
+        "tunnel_topology_seed_cells": int(topology_seed_cells),
+        "tunnel_candidate_cells": int(np.count_nonzero(tunnel_candidate_id > 0)),
+        "tunnel_component_cells": int(np.count_nonzero(tunnel_component_id > 0)),
+        "tunnel_component_count": int(component_index),
+        "tunnel_component_claimed_cells": int(component_claimed_cells),
+        "tunnel_empty_candidate_segments": int(empty_candidate_segments),
+        "tunnel_missing_seed_segments": int(missing_seed_segments),
+        "branch_tunnel_candidate_cells": int(np.count_nonzero(tunnel_candidate_id > 0)),
+        "branch_tunnel_owned_cells": int(np.count_nonzero(owner_id > 0)),
+        "branch_tunnel_owner_segments": int(len(set(int(v) for v in owner_id.tolist() if int(v) > 0))),
+        "branch_tunnel_overlap_reassigned_cells": int(overlap_reassignments),
+        "branch_tunnel_terminal_priority_wins": int(terminal_priority_wins),
+    }, {
+        "TunnelCandidateId": tunnel_candidate_id,
+        "TunnelSeedId": tunnel_seed_id,
+        "TunnelComponentId": tunnel_component_id,
+    }
+
+
+def _dominant_neighbor_label(
+    component: np.ndarray,
+    labels: np.ndarray,
+    adjacency: list[set[int]],
+    rejected_mask: np.ndarray,
+) -> int:
+    neighbor_counts: dict[int, int] = {}
+    component_set = {int(v) for v in component.tolist()}
+    for cell_id in component_set:
+        for nbr_raw in adjacency[cell_id]:
+            nbr = int(nbr_raw)
+            if nbr in component_set or bool(rejected_mask[nbr]):
+                continue
+            label = int(labels[nbr])
+            if label > 0:
+                neighbor_counts[label] = neighbor_counts.get(label, 0) + 1
+    if not neighbor_counts:
+        return 1
+    return int(max(neighbor_counts.items(), key=lambda item: item[1])[0])
+
+
+def _reject_orphan_branch_components(
+    labels: np.ndarray,
+    assignment_mode: np.ndarray,
+    adjacency: list[set[int]],
+    branch_owner_id: np.ndarray,
+    model_face: Optional[np.ndarray],
+    segments: list[GeometrySegment],
+) -> tuple[Dict[str, int], Dict[str, np.ndarray]]:
+    rejected_island_id = np.zeros((labels.shape[0],), dtype=np.int32)
+    total_components = 0
+    kept_components = 0
+    rejected_components = 0
+    rejected_cells = 0
+    segments_with_orphans = 0
+
+    model_face_int = model_face.astype(int) if model_face is not None else None
+    for segment in segments:
+        if segment.segment_type == "aorta_trunk":
+            continue
+        seg_id = int(segment.segment_id)
+        segment_cells = np.flatnonzero(labels == seg_id)
+        if segment_cells.size == 0:
+            continue
+
+        segment_mask = labels == seg_id
+        visited: set[int] = set()
+        components: list[np.ndarray] = []
+        for start_raw in segment_cells.tolist():
+            start = int(start_raw)
+            if start in visited:
+                continue
+            stack = [start]
+            visited.add(start)
+            component: list[int] = []
+            while stack:
+                cell_id = int(stack.pop())
+                component.append(cell_id)
+                for nbr_raw in adjacency[cell_id]:
+                    nbr = int(nbr_raw)
+                    if nbr not in visited and bool(segment_mask[nbr]):
+                        visited.add(nbr)
+                        stack.append(nbr)
+            components.append(np.asarray(component, dtype=np.int32))
+
+        if not components:
+            continue
+        total_components += int(len(components))
+
+        seed_face_id = segment.terminal_face_id
+        seed_touching: list[int] = []
+        owner_touching: list[int] = []
+        for idx, component in enumerate(components):
+            if model_face_int is not None and seed_face_id is not None and np.any(model_face_int[component] == int(seed_face_id)):
+                seed_touching.append(idx)
+            if np.any(branch_owner_id[component] == seg_id):
+                owner_touching.append(idx)
+
+        if seed_touching:
+            keep_idx = max(seed_touching, key=lambda idx: int(components[idx].size))
+        elif owner_touching:
+            keep_idx = max(owner_touching, key=lambda idx: int(components[idx].size))
+        else:
+            keep_idx = max(range(len(components)), key=lambda idx: int(components[idx].size))
+        kept_components += 1
+
+        segment_rejected = 0
+        for idx, component in enumerate(components):
+            if idx == keep_idx:
+                continue
+            target_label = _dominant_neighbor_label(component, labels, adjacency, rejected_island_id > 0)
+            labels[component] = int(target_label)
+            assignment_mode[component] = 9
+            rejected_island_id[component] = seg_id
+            rejected_components += 1
+            rejected_cells += int(component.size)
+            segment_rejected += 1
+        if segment_rejected:
+            segments_with_orphans += 1
+
+    return {
+        "branch_connected_components": int(total_components),
+        "branch_kept_components": int(kept_components),
+        "orphan_branch_components": 0,
+        "rejected_orphan_branch_components": int(rejected_components),
+        "rejected_orphan_branch_component_cells": int(rejected_cells),
+        "branch_segments_with_orphans": int(segments_with_orphans),
+    }, {
+        "RejectedIslandId": rejected_island_id,
+    }
+
+
 def _assign_surface_cells(
     surface: vtk.vtkPolyData,
     segments: list[GeometrySegment],
@@ -1592,16 +2718,21 @@ def _assign_surface_cells(
     labels = np.full((n_cells,), -1, dtype=np.int32)
     assignment_mode = np.zeros((n_cells,), dtype=np.int32)
     seed_segment_id = np.zeros((n_cells,), dtype=np.int32)
-    barrier_segment_id = np.zeros((n_cells,), dtype=np.int32)
-    rejected_segment = np.zeros((n_cells,), dtype=np.int32)
     propagation_cost = np.full((n_cells,), np.inf, dtype=float)
     assignment_counts: Dict[str, int] = {
         SURFACE_ASSIGNMENT_ALGORITHM: 1,
         "fixed_seed_cells": 0,
         "core_seed_cells": 0,
-        "weak_core_seed_cells": 0,
         "propagated_cells": 0,
+        "component_nearest_assigned_cells": 0,
+        "component_branch_owner_assigned_cells": 0,
         "fallback": 0,
+        "aorta_excluded_branch_seed_cells": 0,
+        "branch_owned_aorta_labeled_cells": 0,
+        "branch_labeled_parent_aorta_wall_cells": 0,
+        "orphan_branch_components": 0,
+        "rejected_orphan_branch_components": 0,
+        "rejected_orphan_branch_component_cells": 0,
     }
 
     segment_by_terminal_face = {
@@ -1613,47 +2744,201 @@ def _assign_surface_cells(
     model_face = get_cell_array(surface, "ModelFaceID")
     protected_face_ids = {int(inlet_face_id), *segment_by_terminal_face.keys()}
     adjacency = _surface_cell_adjacency(surface)
-    distance_by_segment, arclength_by_segment, radius_by_segment, nearest_segment = _precompute_segment_projections(centers, segments)
-    blocked_edges, barrier_segment_id, barrier_counts = _build_ostium_barriers(centers, adjacency, segments)
-    assignment_counts.update(barrier_counts)
+    distance_by_segment: dict[int, np.ndarray] = {}
+    arclength_by_segment: dict[int, np.ndarray] = {}
+    radius_by_segment: dict[int, float] = {}
+    nearest_segment = np.zeros((n_cells,), dtype=np.int32)
+    nearest_score = np.full((n_cells,), np.inf, dtype=float)
+    for segment in segments:
+        seg_id = int(segment.segment_id)
+        radius = _segment_assignment_radius(segment)
+        distance_to_segment, arclength = _project_points_to_polyline(centers, _assignment_polyline(segment))
+        distance_by_segment[seg_id] = distance_to_segment
+        arclength_by_segment[seg_id] = arclength
+        radius_by_segment[seg_id] = radius
+        score = distance_to_segment / max(radius, 0.45)
+        better = score < nearest_score
+        nearest_score[better] = score[better]
+        nearest_segment[better] = seg_id
 
-    fixed = np.zeros((n_cells,), dtype=bool)
-    seed_counts = _build_segment_seeds(
-        labels,
-        assignment_mode,
-        seed_segment_id,
-        fixed,
+    branch_owner_id, branch_owner_counts, branch_owner_debug = _build_branch_tunnel_ownership(
         centers,
         model_face,
+        adjacency,
         segments,
-        inlet_face_id,
-        segment_by_terminal_face,
         distance_by_segment,
         arclength_by_segment,
         radius_by_segment,
-        barrier_segment_id,
     )
-    assignment_counts.update(seed_counts)
+    assignment_counts.update(branch_owner_counts)
+
+    fixed = np.zeros((n_cells,), dtype=bool)
+    seed_score = np.full((n_cells,), np.inf, dtype=float)
+    seed_counts_by_segment: dict[int, int] = {int(seg.segment_id): 0 for seg in segments}
+    if model_face is not None:
+        model_face_int = model_face.astype(int)
+        inlet_ids = np.flatnonzero(model_face_int == int(inlet_face_id))
+        assignment_counts["inlet_face_seed_cells"] = _assign_seed(
+            labels,
+            assignment_mode,
+            seed_segment_id,
+            fixed,
+            seed_score,
+            inlet_ids,
+            1,
+            1,
+            force=True,
+        )
+        fixed[inlet_ids] = True
+        seed_counts_by_segment[1] += int(inlet_ids.size)
+
+        terminal_seed_total = 0
+        for face_id, segment_id in segment_by_terminal_face.items():
+            face_ids = np.flatnonzero(model_face_int == int(face_id))
+            assigned = _assign_seed(
+                labels,
+                assignment_mode,
+                seed_segment_id,
+                fixed,
+                seed_score,
+                face_ids,
+                int(segment_id),
+                2,
+                force=True,
+            )
+            fixed[face_ids] = True
+            terminal_seed_total += int(assigned)
+            seed_counts_by_segment[int(segment_id)] = seed_counts_by_segment.get(int(segment_id), 0) + int(face_ids.size)
+        assignment_counts["terminal_face_seed_cells"] = int(terminal_seed_total)
+    else:
+        assignment_counts["inlet_face_seed_cells"] = 0
+        assignment_counts["terminal_face_seed_cells"] = 0
+
     assignment_counts["fixed_seed_cells"] = int(assignment_counts.get("inlet_face_seed_cells", 0)) + int(
         assignment_counts.get("terminal_face_seed_cells", 0)
     )
 
-    propagation_cost = _propagate_surface_labels(
-        centers,
-        adjacency,
-        labels,
-        assignment_mode,
-        fixed,
-        segments,
-        distance_by_segment,
-        arclength_by_segment,
-        radius_by_segment,
-        blocked_edges,
-        rejected_segment,
-    )
+    for segment in segments:
+        seg_id = int(segment.segment_id)
+        radius = radius_by_segment[seg_id]
+        distance_to_segment = distance_by_segment[seg_id]
+        arclength = arclength_by_segment[seg_id]
+        available = ~fixed
+        if segment.segment_type == "aorta_trunk":
+            seed_radius = max(1.25 * radius, 3.0)
+            aorta_seed_candidates = available & (distance_to_segment <= seed_radius)
+            excluded = aorta_seed_candidates & (branch_owner_id > 0)
+            assignment_counts["aorta_excluded_branch_seed_cells"] = int(np.count_nonzero(excluded))
+            candidates = np.flatnonzero(aorta_seed_candidates & (branch_owner_id == 0))
+        else:
+            owner_candidates = available & (branch_owner_id == seg_id)
+            candidates = np.flatnonzero(owner_candidates)
+        scores = distance_to_segment[candidates] / max(radius, 0.45) if candidates.size else np.zeros((0,), dtype=float)
+        assigned = _assign_seed(
+            labels,
+            assignment_mode,
+            seed_segment_id,
+            fixed,
+            seed_score,
+            candidates,
+            seg_id,
+            3,
+            scores,
+        )
+        assignment_counts["core_seed_cells"] += int(assigned)
+        seed_counts_by_segment[seg_id] = seed_counts_by_segment.get(seg_id, 0) + int(assigned)
+
+    segment_by_id = {int(seg.segment_id): seg for seg in segments}
+    queue: list[tuple[float, int, int]] = []
+    for cell_id in np.flatnonzero(labels > 0).tolist():
+        seg_id = int(labels[int(cell_id)])
+        propagation_cost[int(cell_id)] = 0.0
+        heapq.heappush(queue, (0.0, int(cell_id), seg_id))
+
+    while queue:
+        cost, cell_id, seg_id = heapq.heappop(queue)
+        if cost > float(propagation_cost[cell_id]) + 1.0e-12 or int(labels[cell_id]) != int(seg_id):
+            continue
+        segment = segment_by_id.get(int(seg_id))
+        if segment is None:
+            continue
+        radius = max(radius_by_segment.get(int(seg_id), 1.0), 0.45)
+        for nbr_raw in adjacency[cell_id]:
+            nbr = int(nbr_raw)
+            if fixed[nbr] and int(labels[nbr]) != int(seg_id):
+                continue
+            owner = int(branch_owner_id[nbr])
+            if segment.segment_type == "aorta_trunk" and owner > 0:
+                continue
+            if segment.segment_type != "aorta_trunk" and owner != int(seg_id):
+                continue
+            dist_to_segment = float(distance_by_segment[int(seg_id)][nbr])
+            if segment.segment_type != "aorta_trunk" and dist_to_segment > max(3.5 * radius + 0.75, 2.0):
+                continue
+            edge_len = distance(centers[cell_id], centers[nbr])
+            dist_norm = dist_to_segment / radius
+            new_cost = float(cost + edge_len / radius + 0.10 * dist_norm)
+            if new_cost + 1.0e-9 < float(propagation_cost[nbr]):
+                propagation_cost[nbr] = new_cost
+                labels[nbr] = int(seg_id)
+                if assignment_mode[nbr] <= 0:
+                    assignment_mode[nbr] = 4
+                heapq.heappush(queue, (new_cost, nbr, int(seg_id)))
     assignment_counts["propagated_cells"] = int(np.count_nonzero(assignment_mode == 4))
-    assignment_counts["branch_origin_gate_rejected_cells"] = int(np.count_nonzero(rejected_segment > 0))
-    assignment_counts["fallback"] = _recover_unassigned_cells(labels, assignment_mode, nearest_segment)
+
+    missing = np.flatnonzero(labels <= 0)
+    if missing.size:
+        visited = np.zeros((n_cells,), dtype=bool)
+        assigned_by_component = 0
+        assigned_by_owner_component = 0
+        for start_cell in missing.tolist():
+            start_cell = int(start_cell)
+            if visited[start_cell] or labels[start_cell] > 0:
+                continue
+            stack = [start_cell]
+            component: list[int] = []
+            visited[start_cell] = True
+            while stack:
+                cell_id = stack.pop()
+                if labels[cell_id] > 0:
+                    continue
+                component.append(cell_id)
+                for nbr in adjacency[cell_id]:
+                    nbr = int(nbr)
+                    nbr_label = int(labels[nbr])
+                    if nbr_label <= 0 and not visited[nbr]:
+                        visited[nbr] = True
+                        stack.append(nbr)
+            if not component:
+                continue
+            component_ids = np.asarray(component, dtype=np.int32)
+            owned_mask = branch_owner_id[component_ids] > 0
+            if np.any(owned_mask):
+                owned_ids = component_ids[owned_mask]
+                labels[owned_ids] = branch_owner_id[owned_ids]
+                assignment_mode[owned_ids] = 7
+                assigned_by_owner_component += int(owned_ids.size)
+                assigned_by_component += int(owned_ids.size)
+                component_ids = component_ids[~owned_mask]
+                if component_ids.size == 0:
+                    continue
+            best_segment_id = 1
+            labels[component_ids] = int(best_segment_id)
+            assignment_mode[component_ids] = 7
+            assigned_by_component += int(component_ids.size)
+        assignment_counts["component_nearest_assigned_cells"] = int(assigned_by_component)
+        assignment_counts["component_branch_owner_assigned_cells"] = int(assigned_by_owner_component)
+    else:
+        assignment_counts["component_branch_owner_assigned_cells"] = 0
+
+    owner_missing = np.flatnonzero((labels <= 0) & (branch_owner_id > 0))
+    if owner_missing.size:
+        labels[owner_missing] = branch_owner_id[owner_missing]
+        assignment_mode[owner_missing] = 5
+    assignment_counts["fallback_branch_owner_assigned_cells"] = int(owner_missing.size)
+    assignment_counts["fallback"] = int(np.count_nonzero(labels <= 0))
+    if assignment_counts["fallback"]:
+        assignment_counts["fallback"] = _recover_unassigned_cells(labels, assignment_mode, nearest_segment)
 
     cleanup_counts = {
         "cleanup_relabel_components": 0,
@@ -1666,8 +2951,36 @@ def _assign_surface_cells(
             labels,
             protected_face_ids,
             assignment_mode,
+            protected_cells=branch_owner_id > 0,
         )
     assignment_counts.update(cleanup_counts)
+
+    island_counts, island_debug = _reject_orphan_branch_components(
+        labels,
+        assignment_mode,
+        adjacency,
+        branch_owner_id,
+        model_face,
+        segments,
+    )
+    assignment_counts.update(island_counts)
+
+    terminal_face_mask = np.zeros((n_cells,), dtype=bool)
+    if model_face is not None and segment_by_terminal_face:
+        terminal_face_mask = np.isin(model_face.astype(int), list(segment_by_terminal_face.keys()))
+    branch_parent_wall = np.flatnonzero((labels > 1) & (branch_owner_id == 0) & ~terminal_face_mask)
+    assignment_counts["branch_labeled_parent_aorta_wall_before_rescue"] = int(branch_parent_wall.size)
+    if branch_parent_wall.size:
+        labels[branch_parent_wall] = 1
+        assignment_mode[branch_parent_wall] = 8
+    assignment_counts["branch_labeled_parent_aorta_wall_cells"] = int(
+        np.count_nonzero((labels > 1) & (branch_owner_id == 0) & ~terminal_face_mask)
+    )
+
+    branch_owned_as_aorta = np.flatnonzero((branch_owner_id > 0) & (labels == 1))
+    assignment_counts["branch_owned_aorta_labels_before_rescue"] = int(branch_owned_as_aorta.size)
+    assignment_counts["branch_owned_reassigned_from_aorta"] = 0
+    assignment_counts["branch_owned_aorta_labeled_cells"] = int(np.count_nonzero((branch_owner_id > 0) & (labels == 1)))
 
     counts = {int(seg.segment_id): int(np.count_nonzero(labels == int(seg.segment_id))) for seg in segments}
     for seg in segments:
@@ -1677,10 +2990,14 @@ def _assign_surface_cells(
         "AssignmentMode": assignment_mode,
         "SeedSegmentId": seed_segment_id,
         "PropagationCost": np.where(np.isfinite(propagation_cost), propagation_cost, -1.0),
-        "BarrierSegmentId": barrier_segment_id,
         "NearestSegmentId": nearest_segment,
-        "RejectedSegmentId": rejected_segment,
+        "BranchTunnelOwnerId": branch_owner_id,
+        **branch_owner_debug,
+        **island_debug,
     }
+    for seg_id, count in sorted(seed_counts_by_segment.items()):
+        assignment_counts[f"seed_segment_{int(seg_id)}"] = int(count)
+    assignment_counts["seed_count_total"] = int(sum(seed_counts_by_segment.values()))
     return labels, assignment_counts, counts, diagnostics
 
 
@@ -1732,6 +3049,13 @@ def _segment_contract_rows(segments: list[GeometrySegment], node_coords: dict[in
             "terminal_face_id": seg.terminal_face_id,
             "terminal_face_name": seg.terminal_face_name,
             "descendant_terminal_names": [str(v) for v in seg.descendant_terminal_names],
+            "tunnel_source_outlets": [str(v) for v in seg.tunnel_source_outlets],
+            "parent_junction_node_id": seg.parent_junction_node_id,
+            "distal_junction_node_ids": [int(v) for v in seg.distal_junction_node_ids],
+            "outlet_route_node_paths": {str(name): [int(v) for v in path] for name, path in seg.outlet_route_node_paths.items()},
+            "tunnel_assignment_algorithm": TUNNEL_ASSIGNMENT_ALGORITHM,
+            "vmtk_group_ids": [int(v) for v in sorted(seg.vmtk_group_ids)],
+            "assignment_source": "vmtk_branch_clip_group",
             "cell_count": int(seg.cell_count),
             "fallback_cell_count": int(seg.fallback_cell_count),
         }
@@ -1741,6 +3065,12 @@ def _segment_contract_rows(segments: list[GeometrySegment], node_coords: dict[in
             row["proximal_boundary_confidence"] = float(seg.proximal_boundary.confidence)
             row["proximal_boundary_arclength"] = float(seg.proximal_boundary.arclength)
             row["proximal_boundary_selection_algorithm"] = PROXIMAL_BOUNDARY_SELECTION_ALGORITHM
+            if seg.proximal_boundary.loop_points is not None:
+                row["cut_loop_point_count"] = int(np.asarray(seg.proximal_boundary.loop_points).shape[0])
+                row["cut_method"] = "surface_plane_intersection_loop"
+                row["loop_area"] = float(seg.proximal_boundary.area)
+                row["mesh_partition_algorithm"] = MESH_PARTITION_ALGORITHM
+            row["proximal_cut_loop_point_count"] = row.get("cut_loop_point_count", 0)
             if seg.proximal_boundary_warning:
                 row["proximal_boundary_warning"] = seg.proximal_boundary_warning
         elif seg.segment_type != "aorta_trunk":
@@ -1751,6 +3081,11 @@ def _segment_contract_rows(segments: list[GeometrySegment], node_coords: dict[in
                 row["proximal_boundary_warning"] = seg.proximal_boundary_warning
             if seg.proximal_boundary_attempts:
                 row["proximal_boundary_attempts"] = seg.proximal_boundary_attempts
+        if seg.distal_boundaries:
+            row["distal_boundaries"] = [boundary.to_contract() for boundary in seg.distal_boundaries]
+            row["distal_cut_loop_point_count"] = int(sum(np.asarray(boundary.loop_points).shape[0] for boundary in seg.distal_boundaries if boundary.loop_points is not None))
+        else:
+            row["distal_cut_loop_point_count"] = 0
         rows.append(row)
     return rows
 
@@ -1797,6 +3132,7 @@ def _make_contract(
     node_coords: Optional[dict[int, np.ndarray]] = None,
     face_node_map: Optional[Dict[int, Dict[str, Any]]] = None,
     assignment_counts: Optional[Dict[str, int]] = None,
+    vmtk_diagnostics: Optional[Dict[str, Any]] = None,
     total_cells: Optional[int] = None,
 ) -> Dict[str, Any]:
     total_fallback = int((assignment_counts or {}).get("fallback", 0))
@@ -1838,6 +3174,7 @@ def _make_contract(
             "input_vtp": paths.get("input_vtp"),
             "face_map": paths.get("face_map"),
             "surface_cleaned": paths.get("surface_cleaned"),
+            "centerlines_raw_debug": paths.get("centerlines_raw_debug"),
             "centerline_network": paths.get("centerline_network"),
             "step1_metadata": paths.get("step1_metadata"),
         },
@@ -1846,10 +3183,12 @@ def _make_contract(
             "aorta_centerline": paths.get("aorta_centerline"),
             "contract_json": paths.get("contract_json"),
             **({"boundary_debug_vtp": paths["boundary_debug_vtp"]} if "boundary_debug_vtp" in paths else {}),
+            **({"step2_debug_vtp": paths["step2_debug_vtp"]} if "step2_debug_vtp" in paths else {}),
             **({"step2_debug_json": paths["step2_debug_json"]} if "step2_debug_json" in paths else {}),
         },
         "upstream_references": {
             "surface_cleaned": paths.get("surface_cleaned"),
+            "centerlines_raw_debug": paths.get("centerlines_raw_debug"),
             "centerline_network": paths.get("centerline_network"),
             "centerline_network_metadata": paths.get("step1_metadata"),
         },
@@ -1884,6 +3223,8 @@ def _make_contract(
         },
         "qa": {
             "assignment_algorithm": SURFACE_ASSIGNMENT_ALGORITHM,
+            "tunnel_assignment_algorithm": TUNNEL_ASSIGNMENT_ALGORITHM,
+            "mesh_partition_algorithm": MESH_PARTITION_ALGORITHM,
             "total_surface_cells": int(total_cells or 0),
             "assigned_cells": assigned_cells,
             "unassigned_cells": 0 if total_cells is not None else None,
@@ -1891,8 +3232,31 @@ def _make_contract(
             "fallback_percentage": fallback_pct,
             "assignment_mode_counts": assignment_count_values,
             "seed_counts_by_segment": seed_counts_by_segment,
+            "vmtk": vmtk_diagnostics or {},
+            "vmtk_import_source": (vmtk_diagnostics or {}).get("vmtk_import_source"),
+            "vmtk_python": (vmtk_diagnostics or {}).get("vmtk_python"),
+            "vmtk_branch_extractor_group_count": assignment_count_values.get("vmtk_branch_extractor_group_count", 0),
+            "vmtk_clipped_surface_group_count": assignment_count_values.get("vmtk_clipped_surface_group_count", 0),
+            "vmtk_mixed_group_cells": assignment_count_values.get("vmtk_mixed_group_cells", 0),
+            "terminal_face_group_min_confidence": (vmtk_diagnostics or {}).get("terminal_face_group_min_confidence"),
+            "branch_groups_labeled_as_aorta": assignment_count_values.get("branch_groups_labeled_as_aorta", 0),
+            "aorta_groups_labeled_as_branch": assignment_count_values.get("aorta_groups_labeled_as_branch", 0),
             "barrier_cell_count": assignment_count_values.get("barrier_cell_count", 0),
             "blocked_edge_count": assignment_count_values.get("blocked_edge_count", 0),
+            "tunnel_seed_cells": assignment_count_values.get("tunnel_seed_cells", 0),
+            "tunnel_candidate_cells": assignment_count_values.get("tunnel_candidate_cells", 0),
+            "tunnel_component_cells": assignment_count_values.get("tunnel_component_cells", 0),
+            "tunnel_component_count": assignment_count_values.get("tunnel_component_count", 0),
+            "tunnel_component_claimed_cells": assignment_count_values.get("tunnel_component_claimed_cells", 0),
+            "orphan_branch_components": assignment_count_values.get("orphan_branch_components", 0),
+            "rejected_orphan_branch_components": assignment_count_values.get("rejected_orphan_branch_components", 0),
+            "rejected_orphan_branch_component_cells": assignment_count_values.get("rejected_orphan_branch_component_cells", 0),
+            "branch_tunnel_owned_cells": assignment_count_values.get("branch_tunnel_owned_cells", 0),
+            "branch_tunnel_owner_segments": assignment_count_values.get("branch_tunnel_owner_segments", 0),
+            "aorta_excluded_branch_seed_cells": assignment_count_values.get("aorta_excluded_branch_seed_cells", 0),
+            "branch_owned_aorta_labeled_cells": assignment_count_values.get("branch_owned_aorta_labeled_cells", 0),
+            "branch_owned_reassigned_from_aorta": assignment_count_values.get("branch_owned_reassigned_from_aorta", 0),
+            "branch_labeled_parent_aorta_wall_cells": assignment_count_values.get("branch_labeled_parent_aorta_wall_cells", 0),
             "non_empty_segment_count": int(non_empty_segments),
             "segment_count": int(len(segment_rows)),
             "aorta_start_confidence": (start_profile or {}).get("confidence"),
@@ -1922,12 +3286,18 @@ def run_step2(args: argparse.Namespace) -> Dict[str, Any]:
     face_map_path = Path(args.face_map).resolve() if args.face_map else paths_obj.default_face_map
     step1_outputs = step1_metadata.get("output_paths", {})
     surface_cleaned_path = Path(args.surface_cleaned).resolve() if args.surface_cleaned else Path(step1_outputs.get("surface_cleaned", paths_obj.step1_dir / "surface_cleaned.vtp")).resolve()
+    centerlines_raw_path = (
+        Path(args.centerlines_raw_debug).resolve()
+        if args.centerlines_raw_debug
+        else Path(step1_outputs.get("centerlines_raw_debug", paths_obj.step1_dir / "centerlines_raw_debug.vtp")).resolve()
+    )
     centerline_network_path = Path(args.centerline_network).resolve() if args.centerline_network else Path(step1_outputs.get("centerline_network_output", paths_obj.step1_dir / "centerline_network.vtp")).resolve()
 
     required = {
         "input_vtp": input_vtp_path,
         "face_map": face_map_path,
         "surface_cleaned": surface_cleaned_path,
+        "centerlines_raw_debug": centerlines_raw_path,
         "centerline_network": centerline_network_path,
         "step1_metadata": step1_metadata_path,
     }
@@ -1939,11 +3309,19 @@ def run_step2(args: argparse.Namespace) -> Dict[str, Any]:
     output_aorta = output_dir / "aorta_centerline.vtp"
     output_contract = output_dir / "step2_geometry_contract.json"
     output_boundary_debug = output_dir / "boundary_debug.vtp"
+    output_debug_vtp = output_dir / "step2_debug.vtp"
     output_debug_json = output_dir / "step2_debug.json"
+    if not args.write_debug:
+        for stale_debug_path in (output_boundary_debug, output_debug_vtp, output_debug_json):
+            try:
+                stale_debug_path.unlink()
+            except FileNotFoundError:
+                pass
     path_strings = {
         "input_vtp": _abs(input_vtp_path),
         "face_map": _abs(face_map_path),
         "surface_cleaned": _abs(surface_cleaned_path),
+        "centerlines_raw_debug": _abs(centerlines_raw_path),
         "centerline_network": _abs(centerline_network_path),
         "step1_metadata": _abs(step1_metadata_path),
         "segments_vtp": _abs(output_segments),
@@ -1953,17 +3331,27 @@ def run_step2(args: argparse.Namespace) -> Dict[str, Any]:
 
     warnings: list[str] = []
     face_map = _face_map_by_id(read_json(face_map_path))
+    _validate_expected_anatomy(face_map)
     surface = read_vtp(surface_cleaned_path)
+    raw_centerlines = read_vtp(centerlines_raw_path)
     network = read_vtp(centerline_network_path)
     edges, node_coords = _read_network_edges(network)
     graph = _build_graph(edges)
     face_node_map = _map_face_terminations_to_nodes(step1_metadata, face_map, node_coords)
     inlet_node, inlet_row = _resolve_inlet(face_map, face_node_map)
     inlet_face_id = int(inlet_row["face_id"])
+    outlet_routes = _build_outlet_routes(face_map, face_node_map, graph, inlet_node)
 
     bif_node, bif_detail = _resolve_aortic_bifurcation_node(face_map, face_node_map, graph, inlet_node)
-    segments, aorta_node_path = _build_segments(inlet_node, bif_node, graph, edges, face_map, face_node_map)
-    warnings.extend(_refine_branch_boundaries(surface, segments, face_node_map))
+    segments, aorta_node_path = _build_segments(inlet_node, bif_node, graph, edges, face_map, face_node_map, outlet_routes)
+    vmtk_result = _run_vmtk_branch_group_segmentation(
+        surface=surface,
+        raw_centerlines=raw_centerlines,
+        step1_metadata=step1_metadata,
+        face_map=face_map,
+        segments=segments,
+    )
+    partitioned_surface = vmtk_result.surface
     aorta_segment = segments[0]
     aorta_length = float(aorta_segment.length)
     if aorta_length <= 0.0:
@@ -1998,24 +3386,27 @@ def run_step2(args: argparse.Namespace) -> Dict[str, Any]:
         "source_components": ["centerline_landmark", "surface_derived_boundary_profile"],
     }
 
-    labels, assignment_counts, _, diagnostics = _assign_surface_cells(surface, segments, inlet_face_id)
+    labels, assignment_counts, _, diagnostics = _assign_surface_cells_from_vmtk(partitioned_surface, segments, vmtk_result)
     if int(np.count_nonzero(labels <= 0)) > 0:
         raise Step2Failure("Core segment assignment is too unreliable: some cells remained unassigned.")
     if len([seg for seg in segments if seg.cell_count > 0]) < 2:
         raise Step2Failure("Core segment assignment is too unreliable: fewer than two non-empty segments.")
 
-    segments_surface = _build_segments_surface(surface, labels)
+    segments_surface = _build_segments_surface(partitioned_surface, labels)
     write_vtp(segments_surface, output_segments)
     write_vtp(build_polyline_polydata(aorta_segment.points), output_aorta)
 
     if args.write_debug:
-        debug_pd = _build_debug_segments_surface(surface, labels, diagnostics)
-        write_vtp(debug_pd, output_boundary_debug)
+        write_vtp(_build_boundary_loop_debug_polydata(segments), output_boundary_debug)
+        write_vtp(_build_debug_segments_surface(partitioned_surface, labels, diagnostics), output_debug_vtp)
         boundary_debug = {
             str(seg.segment_id): {
                 "name_hint": seg.name_hint,
                 "segment_type": seg.segment_type,
                 "selected_boundary": seg.proximal_boundary.to_contract() if seg.proximal_boundary is not None else None,
+                "cut_loop_points": np.asarray(seg.proximal_boundary.loop_points, dtype=float).tolist()
+                if seg.proximal_boundary is not None and seg.proximal_boundary.loop_points is not None
+                else [],
                 "warning": seg.proximal_boundary_warning,
                 "attempts": seg.proximal_boundary_attempts,
             }
@@ -2025,14 +3416,18 @@ def run_step2(args: argparse.Namespace) -> Dict[str, Any]:
         write_json(
             {
                 "aorta_node_path": aorta_node_path,
+                "outlet_routes": outlet_routes,
                 "face_node_map": face_node_map,
                 "assignment_counts": assignment_counts,
+                "vmtk_diagnostics": vmtk_result.diagnostics,
+                "diagnostic_arrays": {key: np.asarray(value).tolist() for key, value in diagnostics.items()},
                 "bifurcation_detail": bif_detail,
                 "branch_proximal_boundaries": boundary_debug,
             },
             output_debug_json,
         )
         path_strings["boundary_debug_vtp"] = _abs(output_boundary_debug)
+        path_strings["step2_debug_vtp"] = _abs(output_debug_vtp)
         path_strings["step2_debug_json"] = _abs(output_debug_json)
 
     contract = _make_contract(
@@ -2048,7 +3443,8 @@ def run_step2(args: argparse.Namespace) -> Dict[str, Any]:
         node_coords=node_coords,
         face_node_map=face_node_map,
         assignment_counts=assignment_counts,
-        total_cells=int(surface.GetNumberOfCells()),
+        vmtk_diagnostics=vmtk_result.diagnostics,
+        total_cells=int(partitioned_surface.GetNumberOfCells()),
     )
     write_json(contract, output_contract)
     return contract
@@ -2061,6 +3457,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--face-map", default="", help="face_id_to_name.json path.")
     parser.add_argument("--step1-metadata", default="", help="STEP1 centerline_network_metadata.json path.")
     parser.add_argument("--surface-cleaned", default="", help="STEP1 surface_cleaned.vtp path.")
+    parser.add_argument("--centerlines-raw-debug", default="", help="STEP1 centerlines_raw_debug.vtp path.")
     parser.add_argument("--centerline-network", default="", help="STEP1 centerline_network.vtp path.")
     parser.add_argument("--output-dir", default="", help="STEP2 output directory.")
     parser.add_argument("--write-debug", action="store_true", help="Write optional STEP2 debug artifacts.")
@@ -2071,14 +3468,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
     project_root = Path(args.project_root).resolve()
+    _maybe_reexec_with_vmtk_python(project_root)
     output_dir = Path(args.output_dir).resolve() if args.output_dir else build_pipeline_paths(project_root).step2_dir
     output_contract = output_dir / "step2_geometry_contract.json"
     try:
         contract = run_step2(args)
     except Step2Failure as exc:
         output_dir.mkdir(parents=True, exist_ok=True)
+        failure_status = "requires_review" if isinstance(exc, Step2RequiresReview) else "failed"
         failure_contract = _make_contract(
-            status="failed",
+            status=failure_status,
             warnings=[str(exc)],
             paths={
                 "contract_json": _abs(output_contract),
