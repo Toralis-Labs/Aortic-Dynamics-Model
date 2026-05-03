@@ -1,5 +1,6 @@
 # Local runtime environments
 .tools/
+.env
 .venv/
 venv/
 env/
@@ -16,7 +17,14 @@ dist/
 *.egg-info/
 
 # Pipeline-generated artifacts
-Output files/
+Output files/**
+!Output files/
+!Output files/STEP1/
+!Output files/STEP1/surface_cleaned.vtp
+!Output files/STEP1/centerline_network.vtp
+!Output files/STEP1/centerline_network_metadata.json
+!Output files/STEP1/centerlines_raw_debug.vtp
+!Output files/STEP1/junction_nodes_debug.vtp
 _neck_chunks/
 *.pypart
 

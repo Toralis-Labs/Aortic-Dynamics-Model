@@ -1,20 +1,16 @@
-# Clarification And Locked Decisions
+# STEP2 Clarification And Locked Decisions
 
 ## Locked Decisions
 
-- Focus is STEP2 through STEP5 while preserving STEP1 behavior.
-- There is no STEP6 or STEP7 in the active implementation scope.
-- Each step has core outputs for downstream execution and optional debug outputs for
-  diagnosis.
-- Each step writes exactly one main JSON contract.
-- Status values are limited to `success`, `requires_review`, and `failed`.
+- This branch focuses only on STEP2 geometry-contract authoring.
+- STEP1 implementation code is out of scope; only STEP1 output artifacts required by
+  STEP2 are preserved.
+- STEP2 writes exactly one main JSON contract.
+- STEP2 status values are limited to `success`, `requires_review`, and `failed`.
 
 ## Script Names
 
 - STEP2: `step2_geometry_contract.py`
-- STEP3: `step3_naming_orientation.py`
-- STEP4: `step4_infrarenal_neck.py`
-- STEP5: `step5_pipeline_manifest.py`
 
 ## STEP2
 
@@ -28,20 +24,6 @@
   the STEP1 graph, and preserves topology-plus-terminal segments.
 - Fallback policy: `requires_review` above 5% fallback, `failed` above 15% fallback, and
   `requires_review` when fallback affects priority regions.
-
-## STEP3
-
-- STEP3 consumes STEP2 geometry as truth and adds semantic names/landmarks.
-- Priority vessels are abdominal aorta trunk, left/right common iliac, left/right
-  internal iliac, left/right external iliac, and left/right renal arteries.
-- Non-priority unmatched vessels should warn rather than fail.
-- Low-confidence priority vessel starts should return `requires_review`.
-
-## STEP4
-
-- STEP4 writes grouped machine-readable measurements.
-- Unmeasurable individual values use `{ "status": "unmeasurable" }`.
-- Missing required iliac diameter series is a hard failure once STEP4 is implemented.
 
 ## Demo Face Map
 

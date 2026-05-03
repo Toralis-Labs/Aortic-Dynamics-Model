@@ -1,25 +1,55 @@
-# Aortic Dynamics Model
+# STEP2 Isolated Geometry Contract Branch
 
-Contract-driven vascular geometry pipeline for abdominal aortic analysis.
+This branch isolates STEP2 from the larger vascular pipeline so geometry-contract work can
+be run, diagnosed, and improved without later-stage code or product-module noise.
 
-The active development path is:
+Source branch: `rishu/clean-up-n-fix`
 
-1. `step1segment.py` preserves the existing STEP1 centerline/topology network.
-2. `step2_geometry_contract.py` authors the strict geometry contract.
-3. `step3_naming_orientation.py` consumes STEP2 geometry and adds vessel names/landmarks.
-4. `step4_infrarenal_neck.py` is the current measurement scaffold.
-5. `step5_pipeline_manifest.py` validates step outputs and aggregates status.
+Active entrypoint:
 
-Generated outputs are written under `Output files/` and are intentionally ignored by Git.
-The checked-in demo input is `0044_H_ABAO_AAA/0156_0001.vtp` with
-`0044_H_ABAO_AAA/face_id_to_name.json`.
+```bash
+python step2_geometry_contract.py
+```
 
-## Runtime Notes
+## Expected Inputs
 
-STEP1 requires VMTK for centerline extraction. `step1segment.py` will automatically
-relaunch with a VMTK-capable Python when one is found, including the repo-local ignored
-environment at `.tools/m/envs/vmtk-step2/python.exe`. You can also point it at another
-interpreter with `CENTERLINE_NETWORK_VMTK_PYTHON`.
+STEP2 consumes the preserved STEP1 output artifacts:
 
-STEP2 runs with the project Python/VTK stack after STEP1 has written the canonical
-`Output files/STEP1` artifacts.
+- `Output files/STEP1/surface_cleaned.vtp`
+- `Output files/STEP1/centerline_network.vtp`
+- `Output files/STEP1/centerline_network_metadata.json`
+- `Output files/STEP1/centerlines_raw_debug.vtp`
+- `Output files/STEP1/junction_nodes_debug.vtp`
+
+STEP2 also uses the minimal checked-in demo model inputs:
+
+- `0044_H_ABAO_AAA/0156_0001.vtp`
+- `0044_H_ABAO_AAA/face_id_to_name.json`
+
+## Expected Outputs
+
+STEP2 writes runtime artifacts under `Output files/STEP2/`:
+
+- `segmentscolored.vtp`
+- `aorta_centerline.vtp`
+- `step2_geometry_contract.json`
+
+Optional debug output is written only when requested by the STEP2 CLI.
+
+## Dependencies
+
+At a high level, STEP2 requires:
+
+- Python
+- `numpy`
+- `vtk`
+- `vmtk` / `vmtkscripts` branch tooling for branch extraction, clipping, and sections
+
+## Excluded
+
+This branch intentionally excludes STEP1 implementation code, STEP3 naming, STEP4
+measurements, STEP5 validation, IFU matching, device selection, device sizing, CFD, WSS,
+ML training, clinical suitability assessment, archives, generated later-stage outputs,
+and unrelated prototypes.
+
+This branch is for STEP2 development only.

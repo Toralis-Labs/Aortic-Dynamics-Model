@@ -1,7 +1,0 @@
-{
-  "python-envs.defaultEnvManager": "ms-python.python:system",
-  "python-envs.defaultPackageManager": "ms-python.python:pip",
-  "python.defaultInterpreterPath": "python",
-  "python.terminal.activateEnvironment": true,
-  "terminal.integrated.defaultProfile.windows": "PowerShell"
-}
