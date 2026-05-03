@@ -1,6 +1,6 @@
 # Geometry Segmentation Resources
 
-This folder defines the rules for the isolated Step 2 geometry-segmentation branch.
+This folder defines the rules for the geometry segmentation workspace.
 
 This branch solves one problem only:
 

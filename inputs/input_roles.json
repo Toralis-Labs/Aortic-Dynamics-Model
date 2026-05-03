@@ -18,6 +18,7 @@
     "only_named_segment": "aortic_body",
     "all_other_segments_are_anonymous": true,
     "branch_label_prefix": "branch_",
-    "bifurcation_label_prefix": "bifurcation_"
+    "bifurcation_label_prefix": "bifurcation_",
+    "ring_label_prefix": "ring_"
   }
 }
