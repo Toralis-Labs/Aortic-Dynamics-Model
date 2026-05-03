@@ -142,6 +142,57 @@ centerline routes
 surface geometry
 ```
 
+## VMTK Rule
+
+VMTK is required.
+
+Codex must not merely check that VMTK imports successfully.
+
+Codex must use VMTK branch tooling as part of the branch/surface partitioning or validation strategy.
+
+Codex must not bypass VMTK with a purely centerline-only segmentation unless explicitly instructed.
+
+VMTK output is a required baseline/proposal, not the final authority for ostium placement.
+
+Final ring placement must be validated against surface geometry and parent-child segment assignment.
+
+Codex must not accept a branch-start ring only because:
+
+```text
+it is located at a centerline graph node
+VMTK generated a group boundary there
+the branch centerline begins there
+```
+
+Codex may use VMTK to support:
+
+```text
+split/grouped centerline interpretation
+branch clipping
+baseline surface partitioning
+bifurcation profile proposals
+branch/surface validation
+```
+
+Codex must still validate final circular rings using:
+
+```text
+actual surface geometry
+centerline tangent direction
+local radius or diameter evidence
+parent-child surface assignment
+ring visibility in boundary_rings.vtp
+ring consistency with segmented_surface.vtp
+```
+
+If VMTK and ring validation disagree, Codex must mark the relevant ring or segment as:
+
+```text
+requires_review
+```
+
+unless the code can refine the ring to a better surface-consistent position.
+
 ## Boundary Ring Rules
 
 Circular rings are actual cut-boundaries.
@@ -176,6 +227,13 @@ Fallback radius:
 
 ```text
 centerline radius
+```
+
+A ring must not be marked successful unless it is consistent with both:
+
+```text
+surface geometry
+parent-child segment assignment
 ```
 
 ## Minimal Change Rule
@@ -234,6 +292,8 @@ segmentation_result.json contains required fields
 VTP files are generated
 labels follow the allowed label rules
 rings are recorded in JSON
+VMTK was used as part of partitioning or validation
+ring placement was validated against surface geometry
 ```
 
 If ParaView inspection is required but not performed, Codex must say so.

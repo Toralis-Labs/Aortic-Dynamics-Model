@@ -10,6 +10,8 @@ The ring is not decorative.
 
 The ring is the simplified geometric representation of the actual cut used to separate surface cells.
 
+The ring is also the reviewable geometry object that makes the segmentation understandable in ParaView.
+
 ## Required Ring Geometry
 
 Each ring must be represented by:
@@ -196,6 +198,49 @@ A parent segment must not absorb the true beginning of a child branch.
 
 The ring should be placed as close as possible to the true branch origin while remaining stable and circular.
 
+## VMTK And Ring Acceptance
+
+VMTK may propose a parent-child surface partition, but the circular boundary ring must still be validated.
+
+A branch-start ring is acceptable only if it satisfies all of the following:
+
+```text
+it is near the branch origin
+it does not include obvious parent wall inside the child segment
+it does not start too far distal inside the daughter branch
+its normal follows the child centerline tangent
+its radius is consistent with local branch size
+its position is consistent with the parent-child surface partition
+```
+
+If VMTK and the ring candidate disagree, the ring should be marked:
+
+```text
+requires_review
+```
+
+unless the code can refine the ring to a better position.
+
+VMTK output is a baseline or proposal.
+
+VMTK output is not the final authority for ring placement.
+
+The final authority is whether the circular ring correctly separates parent and child surface geometry.
+
+A ring must not be accepted only because it is located at a centerline graph node.
+
+A ring must not be accepted only because VMTK generated a group boundary.
+
+The ring must be checked against:
+
+```text
+actual surface geometry
+local branch direction
+local branch size
+parent-child cell assignment
+visible boundary-ring placement
+```
+
 ## Circularity Requirement
 
 The output ring should be circular, not jagged.
@@ -231,6 +276,9 @@ ring radius is much too large
 ring radius is much too small
 ring does not correspond to the surface split
 ring does not appear in segmentation_result.json
+VMTK partition and ring placement disagree
+ring was accepted only from a centerline node
+ring was accepted only from a VMTK group boundary without surface validation
 ```
 
 ## Quality Fields
