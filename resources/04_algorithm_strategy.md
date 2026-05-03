@@ -1,249 +1,39 @@
 # Algorithm Strategy
 
-## High-Level Strategy
+## Scope
 
-The code should use the input vascular surface and centerline/topology artifacts to produce:
+Use VTK/NumPy centerline and surface-cut logic.
 
-```text
-aortic_body
-anonymous branch segments
-anonymous bifurcation records
-circular cut-boundary rings
-parent-child topology
-segmentation result JSON
-```
+VMTK must not be imported, required, or reintroduced.
 
-The algorithm must stay geometry-first.
+Do not add broad architecture.
 
-It must not become a vessel-naming algorithm.
+Do not create new output types.
 
-## Inputs
+Do not solve naming, clinical interpretation, measurement extraction, simulation, or downstream workflow problems.
 
-Use:
+The next code prompt must focus only on:
 
 ```text
-inputs/surface_cleaned.vtp
-inputs/centerline_network.vtp
-inputs/centerline_network_metadata.json
-inputs/input_roles.json
+branch_start selection logic
+surface assignment correction
 ```
 
-The input roles file identifies:
+## Required Inputs
+
+Use existing input artifacts from:
 
 ```text
-aortic inlet face
-terminal outlet faces
+inputs/
 ```
 
-It must not identify named vessels.
+Do not edit inputs.
 
-## Core Algorithm Steps
+Do not require vessel-name metadata.
 
-### 1. Load Input Artifacts
+## Required Outputs
 
-Load:
-
-```text
-surface_cleaned.vtp
-centerline_network.vtp
-centerline_network_metadata.json
-input_roles.json
-```
-
-Validate:
-
-```text
-surface exists
-centerline network exists
-metadata exists
-aortic inlet face exists
-terminal outlet faces exist
-```
-
-### 2. Build Centerline Graph
-
-Use the centerline network to build a graph.
-
-The graph should support:
-
-```text
-node coordinates
-edge IDs
-edge lengths
-parent-child routing
-branch paths
-bifurcation detection
-```
-
-### 3. Resolve Aortic Body
-
-Use the input aortic inlet face to identify the root.
-
-Resolve the aortic body as the main root segment.
-
-The output label must be:
-
-```text
-aortic_body
-```
-
-Do not use older trunk names.
-
-Only use:
-
-```text
-aortic_body
-```
-
-### 4. Identify Anonymous Branch Segments
-
-Every connected branch segment after the aortic body should be anonymous.
-
-Use:
-
-```text
-branch_001
-branch_002
-branch_003
-```
-
-Branch IDs should be stable within one run.
-
-The exact numbering does not need to imply anatomy.
-
-### 5. Identify Bifurcations
-
-A bifurcation occurs where a parent segment splits into two or more child segments.
-
-Bifurcations should be recorded as anonymous structures:
-
-```text
-bifurcation_001
-bifurcation_002
-```
-
-For each bifurcation, record:
-
-```text
-parent_segment_id
-child_segment_ids
-parent_pre_bifurcation_ring_id
-daughter_start_ring_ids
-```
-
-### 6. Estimate Boundary Ring Locations
-
-For every branch start, estimate the best boundary location.
-
-A branch-start ring should be:
-
-```text
-as close as possible to the true branch origin
-without including parent wall inside the child segment
-without starting too far inside the child branch
-```
-
-Branch-start placement must use:
-
-```text
-surface_validated_branch_start_ring_v1
-```
-
-The child centerline start point is only a search origin.
-
-The final branch-start ring is selected by candidate search:
-
-```text
-1. sample offsets along the child centerline from the topology start
-2. cut the input surface with a local plane perpendicular to the child tangent
-3. extract connected cut components
-4. score compact circular candidates by radius, centroid offset, spread, and stability
-5. reject candidates classified as too_proximal_parent_contaminated
-6. avoid candidates classified as too_distal_after_stable_section
-7. choose the earliest stable_child_tube candidate
-8. use the selected offset as the actual parent-child cut-boundary
-```
-
-If no stable candidate exists, topology fallback is allowed only as:
-
-```text
-topology_fallback_requires_review
-```
-
-and the ring must remain:
-
-```text
-requires_review
-```
-
-For bifurcations, estimate:
-
-```text
-parent_pre_bifurcation ring
-daughter_start rings
-```
-
-The algorithm must preserve measurable distances between parent and daughter rings.
-
-### 7. Estimate Ring Orientation
-
-Branch-start ring:
-
-```text
-normal = child branch tangent
-```
-
-Parent pre-bifurcation ring:
-
-```text
-normal = parent segment tangent
-```
-
-Daughter-start ring:
-
-```text
-normal = daughter segment tangent
-```
-
-### 8. Estimate Ring Radius
-
-Preferred:
-
-```text
-radius = local equivalent diameter / 2
-```
-
-Fallback:
-
-```text
-radius = centerline radius
-```
-
-If radius is estimated with weak evidence, mark the ring as:
-
-```text
-requires_review
-```
-
-### 9. Use Rings as Cut Boundaries
-
-The circular ring must be used as the actual cut-boundary.
-
-The segmentation should assign parent and child surface cells consistently with the ring.
-
-The final surface segmentation should not depend only on a visual ring if the surface cells are separated differently.
-
-For branch-start rings, the selected `source_centerline_s_mm` from `surface_validated_branch_start_ring_v1` must be applied back to the segmented surface:
-
-```text
-branch cells projected proximal to the selected ring remain with the parent segment
-branch cells distal to the selected ring may belong to the child segment
-the reassignment count is recorded in diagnostics
-```
-
-### 10. Write Outputs
-
-Write:
+Write only:
 
 ```text
 outputs/segmented_surface.vtp
@@ -251,154 +41,103 @@ outputs/boundary_rings.vtp
 outputs/segmentation_result.json
 ```
 
-## Dependency Strategy
+Optional compact diagnostics are governed by `resources/05_validation_and_iteration.md`.
 
-This isolated geometry segmentation branch intentionally avoids VMTK branch tooling and VMTK compiled wrappers. It uses VTK + NumPy + input centerline/surface artifacts.
+No candidate VTPs, all-candidate dumps, branch cloud files, or raw component files are allowed unless a future prompt explicitly requests them.
 
-VMTK branch tooling is intentionally out of scope for this isolated branch. The implementation uses VTK/NumPy centerline and surface-cut logic instead.
+## Stable Daughter Section + Backward Refinement
 
-The final authority is whether the circular ring correctly separates parent and child surface geometry.
-
-The correct strategy is:
+For branch starts, the final algorithm strategy is:
 
 ```text
-centerline topology and tangent direction
-+ local surface evidence
-+ circular ring candidate evaluation
-+ parent-child surface assignment checks
-= final accepted boundary ring
+stable daughter section first
+then backward refinement
+then last clean candidate before parent contamination
 ```
 
-A ring must not be accepted only because it is located at a centerline graph node.
+For `branch_start` placement, Codex must not treat the topology start as final.
 
-The ring must be checked against the actual surface and parent-child segment assignment.
-
-## Helper Tool Role
-
-Existing VTK, NumPy, and general Python centerline/surface helpers may be used.
-
-Allowed helper use:
+The implementation must:
 
 ```text
-initial branch grouping
-centerline splitting
-surface partition estimate
-surface cut proposal
-branch section estimation from local surface evidence
-surface partition validation
+1. Start from the branch topology origin.
+2. Search distally along the child centerline.
+3. Generate surface-cut candidates perpendicular to the child tangent.
+4. Find a stable daughter-tube section using compactness, radius plausibility, centroid closeness to centerline, and absence of parent-wall contamination.
+5. Use that stable section to establish a reliable daughter radius/contour reference.
+6. Walk backward toward the parent in small steps.
+7. Stop when parent contamination or unstable mixed parent-child geometry appears.
+8. Select the most proximal candidate that is still clean and stable.
+9. Use that candidate as the circular branch_start cut-boundary.
+10. Reassign surface cells so the surface split is consistent with the selected ring.
 ```
 
-But helper output is not final authority.
+The selected `branch_start` ring must be the earliest stable daughter-boundary after backward refinement, not the first candidate that produces a cut.
 
-If a helper-produced boundary is wrong, the code must refine or replace it.
-
-The final authority is whether the circular cut-boundary ring correctly separates parent and child geometry.
-
-## Ring-First Refinement Strategy
-
-The best strategy is to treat branch boundaries as ring placement problems.
-
-For each branch:
+Required branch-start algorithm name:
 
 ```text
-1. Find the branch centerline path.
-2. Estimate the branch origin region from centerline topology.
-3. Estimate a local diameter or radius from surface cuts or nearby surface points.
-4. Place a circular ring perpendicular to the local branch tangent.
-5. Test whether the ring is too proximal or too distal.
-6. Test whether the ring is consistent with the actual surface and parent-child partition.
-7. Use the ring as the parent-child cut boundary.
-8. Record confidence and warnings.
+surface_validated_branch_start_ring_v1
 ```
 
-For bifurcations:
+## Forbidden Branch-Start Strategy
+
+Do not use:
 
 ```text
-1. Find the parent segment.
-2. Find daughter segments.
-3. Place a parent_pre_bifurcation ring on the parent.
-4. Place daughter_start rings on each daughter.
-5. Preserve the measurable distance between these rings.
-6. Validate the rings against the surface and parent-child partition.
-7. Record topology and ring IDs in JSON.
+topology start -> first acceptable candidate -> final ring
 ```
 
-## Ring Candidate Acceptance Strategy
+The topology start is only a search origin.
 
-A circular ring candidate should be accepted only when it passes geometric checks.
+The final ring requires surface-cut evidence and surface assignment consistency.
 
-Required checks:
+## Surface Assignment Correction
 
-```text
-ring is near the branch origin
-ring normal follows the local child or parent tangent
-ring radius is consistent with local branch size
-ring does not include obvious parent wall inside the child segment
-ring does not start too far distal inside the child branch
-ring is consistent with local surface evidence
-ring is consistent with final surface cell assignment
-ring is visible in boundary_rings.vtp
-ring is recorded in segmentation_result.json
-```
+The selected circular ring must drive parent-child surface assignment.
 
-If any required check is uncertain, the ring should be marked:
+Surface cells associated with the child branch but proximal to the selected `branch_start` ring must be reassigned to the parent.
+
+`segmented_surface.vtp` must agree with `boundary_rings.vtp`.
+
+If the ring and surface split disagree, the run status must be:
 
 ```text
 requires_review
 ```
 
-If a ring is only supported by centerline topology and not by surface evidence, it should not be marked successful.
-
-## Forbidden Algorithm Goals
-
-Do not optimize for vessel names.
-
-Do not optimize for clinical labels.
-
-Do not introduce device, simulation, or measurement objectives.
-
-Do not reframe this repository as part of a larger workflow.
-
-## Minimal Acceptable Version
-
-A minimal acceptable version must:
+or:
 
 ```text
-load inputs
-use VTK/NumPy centerline and surface-cut logic
-write segmented_surface.vtp
-write boundary_rings.vtp
-write segmentation_result.json
-label only aortic_body by name
-label all other segments anonymously
-create visible circular rings
-record every ring in JSON
-mark uncertainty clearly
+failed
 ```
 
-## Better Version
+## Bifurcation Strategy
 
-A better version additionally:
+Bifurcation output must stay minimal.
+
+Use:
 
 ```text
-uses rings as actual cut boundaries
-preserves parent-child topology
-handles branches of branches
-handles bifurcations with parent and daughter rings
-validates rings against actual surface geometry
-reports confidence and failure modes
+one parent_pre_bifurcation ring
+one daughter_start ring per child segment
 ```
 
-## Best Version
+Preserve measurable parent-to-daughter separation.
 
-A best version:
+Do not collapse bifurcation rings into one point unless the geometry has no measurable separation.
+
+## Acceptance Authority
+
+The final authority is:
 
 ```text
-places every branch and bifurcation ring correctly
-avoids parent wall contamination
-avoids overly distal branch starts
-keeps rings circular and visually clean
-preserves measurable distance between parent and daughter bifurcation rings
-creates ParaView-friendly outputs every run
-records disagreements between surface evidence and ring validation
+clean circular ring placement
+surface-cut evidence
+parent-child surface assignment consistency
+minimal output contract compliance
 ```
+
+Centerline topology is an origin and routing guide only.
+
+It is not final placement authority.

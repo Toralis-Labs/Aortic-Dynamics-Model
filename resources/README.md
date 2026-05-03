@@ -1,50 +1,37 @@
 # Geometry Segmentation Resources
 
-This folder defines the rules for the geometry segmentation workspace.
+## Contract Role
 
-This isolated geometry segmentation branch intentionally avoids VMTK branch tooling and VMTK compiled wrappers. It uses VTK + NumPy + input centerline/surface artifacts.
+This is a strict geometry segmentation workspace.
 
-This branch solves one problem only:
+The resources are constraints, not suggestions. Future code prompts must obey these files before editing code.
 
-> Segment a vascular surface into an aortic body and anonymous connected branch segments using clean circular cut-boundaries.
-
-The code must not solve vessel naming, clinical interpretation, measurement extraction, device matching, simulation, machine learning, or downstream workflow integration.
-
-The only readable anatomical label allowed in outputs is:
+The one current target is:
 
 ```text
-aortic_body
+correct circular branch_start and bifurcation cut-boundary placement
 ```
 
-All other structures must use anonymous geometry labels:
+The current failure is:
 
 ```text
-branch_001
-branch_002
-branch_003
-bifurcation_001
-ring_001
-ring_002
-ring_003
+branch_start rings are too proximal / too early, especially for steep branches close to the aortic body
 ```
 
-The circular boundary ring is not decorative.
-
-The circular boundary ring represents the actual cut-boundary used to separate a parent segment from a child segment.
-
-Required inputs live in:
+The next code work must fix only:
 
 ```text
-inputs/
+surface-validated ring selection logic
+surface assignment consistency with the selected ring
 ```
 
-Required outputs must be written to:
+Codex must prefer deletion, simplification, and tighter contracts over new outputs, new arrays, new JSON fields, broad helper systems, or broad architecture.
 
-```text
-outputs/
-```
+VTP and JSON outputs are intentionally minimal.
 
-Required output files:
+## Required Outputs
+
+Required output files only:
 
 ```text
 outputs/segmented_surface.vtp
@@ -52,23 +39,37 @@ outputs/boundary_rings.vtp
 outputs/segmentation_result.json
 ```
 
-These resources are the controlling documents for Codex.
-
-Codex must read these files before editing code:
+Optional compact diagnostic file:
 
 ```text
-1. resources/01_problem.md
-2. resources/02_target_outputs.md
-3. resources/03_boundary_ring_contract.md
-4. resources/04_algorithm_strategy.md
-5. resources/05_validation_and_iteration.md
-6. resources/06_codex_rules.md
+outputs/segmentation_diagnostics.json
 ```
 
-The code must stay focused on geometry segmentation.
+No other output file is required or allowed unless a future prompt explicitly requests it.
 
-The code must not reintroduce old pipeline language, named branch labels, clinical labels, or extra downstream modules.
+## Required Strategy
 
-This branch is not the full vascular planning pipeline.
+For branch starts:
 
-This branch is a focused geometry workspace for building, debugging, validating, and improving anonymous vascular surface segmentation using circular cut-boundary rings.
+```text
+stable daughter section first
+then backward refinement
+then last clean candidate before parent contamination
+```
+
+The topology start is only a search origin.
+
+It is not the final ostium by default.
+
+## Required Reading
+
+Before future code edits, read:
+
+```text
+resources/01_problem.md
+resources/02_target_outputs.md
+resources/03_boundary_ring_contract.md
+resources/04_algorithm_strategy.md
+resources/05_validation_and_iteration.md
+resources/06_codex_rules.md
+```

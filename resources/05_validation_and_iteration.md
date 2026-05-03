@@ -1,32 +1,26 @@
-# Validation And Iteration Protocol
+# Validation And Iteration
 
 ## Purpose
 
-Every code change must be judged against the same target:
+Every run must validate only the minimal outputs.
 
-> Does the code produce a visually usable segmented surface and circular cut-boundary rings that correctly separate parent and child segments?
+The main visual inspection target is:
 
-This isolated geometry segmentation branch intentionally avoids VMTK branch tooling and VMTK compiled wrappers. It uses VTK + NumPy + input centerline/surface artifacts.
-
-VMTK availability is not a success or failure criterion for this branch.
-
-Do not judge progress by whether the code preserves old pipeline behavior.
-
-Do not judge progress by vessel names.
-
-## Required Run Command
-
-Preferred command:
-
-```bash
-python step2_geometry_contract.py
+```text
+branch does not start on parent/aortic wall
 ```
 
-The entrypoint filename may remain for now even though the repository is now conceptually a geometry segmentation workspace.
+Do not add debug outputs to compensate for uncertain geometry.
+
+When uncertain, mark:
+
+```text
+requires_review
+```
 
 ## Required Output Check
 
-After every run, confirm these files exist:
+Required files:
 
 ```text
 outputs/segmented_surface.vtp
@@ -34,39 +28,47 @@ outputs/boundary_rings.vtp
 outputs/segmentation_result.json
 ```
 
-If any are missing, the run failed.
-
-## ParaView Check
-
-Open:
+Optional compact diagnostic file:
 
 ```text
-outputs/segmented_surface.vtp
-outputs/boundary_rings.vtp
+outputs/segmentation_diagnostics.json
 ```
 
-Expected:
+If any required output is missing, the run is:
 
 ```text
-segmented_surface.vtp opens
-boundary_rings.vtp opens
-SegmentId exists
-SegmentLabel exists
-SegmentColor exists
-rings are visible
-aortic_body is visible
-branch segments are visually separable
+failed
 ```
+
+## VTP Array Check
+
+`outputs/segmented_surface.vtp` must contain only these required cell arrays:
+
+```text
+SegmentId
+SegmentLabel
+SegmentColor
+```
+
+`outputs/boundary_rings.vtp` must contain only these required cell arrays:
+
+```text
+RingId
+RingLabel
+RingType
+ParentSegmentId
+ChildSegmentId
+SegmentId
+RadiusMm
+Confidence
+Status
+```
+
+No extra VTP arrays are allowed unless a future prompt explicitly requests them.
 
 ## JSON Check
 
-Open:
-
-```text
-outputs/segmentation_result.json
-```
-
-Expected top-level keys:
+`outputs/segmentation_result.json` must contain only these required top-level keys:
 
 ```text
 status
@@ -79,101 +81,91 @@ warnings
 metrics
 ```
 
-## Label Check
+JSON must be compact and bounded.
 
-Allowed readable anatomical label:
+Do not include raw surface points, raw candidate points, raw cut contour points, every plane-cut component, large candidate lists, or debug dumps.
 
-```text
-aortic_body
-```
+## Branch-Start Refinement Check
 
-Allowed anonymous labels:
+Every `branch_start` ring must use:
 
 ```text
-branch_001
-branch_002
-branch_003
-bifurcation_001
-ring_001
-ring_002
+surface_validated_branch_start_ring_v1
 ```
 
-If any old named branch label appears in output VTP labels or JSON segment labels, the output fails.
-
-## Ring Check
-
-Every branch segment must have a proximal boundary ring.
-
-Every `branch_start` ring must record:
+The output must contain:
 
 ```text
-selection_algorithm = surface_validated_branch_start_ring_v1
-topology_start_xyz
-selected_offset_mm
-candidate_count
-accepted_candidate_count
-selected_candidate_classification
-selected_radius_rule
-surface_cut_used
-candidate_metrics
-cells_reassigned_to_parent_count
-ring_assignment_consistency_status
+stable daughter section
+backward refinement
 ```
 
-If `selected_candidate_classification` is `topology_fallback_requires_review`, the ring must be marked:
+as the required strategy in resource-controlled metadata or warnings when relevant.
+
+If topology fallback is used, the ring must be:
 
 ```text
 requires_review
 ```
 
-and the JSON must explain that no stable surface-cut candidate was accepted.
-
-Every bifurcation should have:
+If `selected_offset_mm` is `0.0`, the JSON must prove surface-cut validation at that location or the ring must be:
 
 ```text
-one parent_pre_bifurcation ring
-one daughter_start ring per daughter branch
+requires_review
 ```
 
-Every ring must have:
+The topology start is only a search origin.
+
+topology-only branch_start rings must be requires_review.
+
+## Ring And Surface Agreement
+
+If `boundary_rings.vtp` shows a refined ring but `segmented_surface.vtp` still starts the branch at the old topology point, the run must be:
 
 ```text
-center_xyz
-normal_xyz
-radius_mm
-ring_type
-parent_segment_id
-child_segment_id if applicable
-confidence
+requires_review
+```
+
+or:
+
+```text
+failed
+```
+
+If surface coloring and ring placement disagree, the run must be:
+
+```text
+requires_review
+```
+
+or:
+
+```text
+failed
+```
+
+## Diagnostics Contract
+
+If `outputs/segmentation_diagnostics.json` exists, it must be compact.
+
+Allowed top-level diagnostic sections only:
+
+```text
 status
+outputs_exist
+vtp_arrays
+labels
+branch_start_refinement
 warnings
+failures
+next_recommended_focus
 ```
 
-## Boundary Placement Failure Classes
-
-Classify every failure using one of these terms:
+Allowed `branch_start_refinement` fields:
 
 ```text
-missing_output
-missing_segment_array
-missing_ring
-ring_too_proximal
-ring_too_distal
-ring_wrong_angle
-ring_radius_too_large
-ring_radius_too_small
-parent_wall_in_child_segment
-child_start_absorbed_by_parent
-fragmented_boundary
-surface_not_openable
-ring_not_visible
-json_missing_required_fields
-old_named_branch_label
-```
-
-Branch-start refinement diagnostics must also summarize:
-
-```text
+algorithm
+branch_count
 refined_ring_count
 topology_fallback_ring_count
 stable_candidate_found_count
@@ -183,112 +175,47 @@ rings_requiring_review
 per_ring_summary
 ```
 
-## Status Rules
-
-Use:
+Each `per_ring_summary` item must contain only:
 
 ```text
-success
+ring_id
+segment_id
+segment_label
+selected_offset_mm
+status
+classification
+confidence
+candidate_count
+warning_count
+cells_reassigned_to_parent_count
 ```
 
-only when all required outputs are written and no required boundary is uncertain.
+Diagnostics must not include raw surface points, raw candidate points, raw cut contour points, raw candidate contours, large arrays, or plane-cut component dumps.
 
-Use:
+## Label Check
+
+The only anatomical/readable label allowed is:
 
 ```text
-requires_review
+aortic_body
 ```
 
-when outputs are written but one or more boundaries are uncertain.
+All branch, bifurcation, and ring labels must be anonymous.
 
-Use:
+If output labels violate this rule, the run is:
 
 ```text
 failed
 ```
 
-when outputs are missing, unreadable, or the segmentation cannot be trusted.
+## Iteration Rule
 
-## Iteration Loop
+Every code iteration must target the smallest specific failure.
 
-Every change must follow this loop:
-
-```text
-1. Read resources.
-2. Identify the smallest specific failure.
-3. Change only the code needed for that failure.
-4. Run the script.
-5. Check output files.
-6. Inspect VTPs.
-7. Inspect JSON.
-8. Classify remaining failures.
-9. Repeat only if the next change is clearly linked to the failure.
-```
-
-## Stop Conditions
-
-Stop when:
+For the next code prompt, the only allowed target is:
 
 ```text
-all required outputs are written
-segmented_surface.vtp is viewable
-boundary_rings.vtp is viewable
-aortic_body is the only anatomical label
-all other segments are anonymous
-rings are circular
-rings are recorded in JSON
-branch and bifurcation boundaries are not obviously too proximal or too distal
+surface-validated branch_start ring selection and surface assignment correction
 ```
 
-If the code cannot reach this state, stop and document the blocker.
-
-## Do Not Hide Uncertainty
-
-If a ring is guessed, mark it as:
-
-```text
-requires_review
-```
-
-If a segment boundary is uncertain, write a warning.
-
-If a branch cannot be separated reliably, do not silently label it as successful.
-
-## Required Developer Report After Each Iteration
-
-After a code change, report:
-
-```text
-files changed
-specific failure targeted
-what logic changed
-what was not changed
-compile result
-runtime result
-outputs produced
-remaining failures
-next smallest recommended change
-```
-
-## Validation Commands
-
-At minimum, run:
-
-```bash
-python -m py_compile step2_geometry_contract.py src/step2/geometry_contract.py
-python -m py_compile src/common/paths.py src/common/geometry.py src/common/json_io.py src/common/vtk_helpers.py
-```
-
-If runtime dependencies are available, run:
-
-```bash
-python step2_geometry_contract.py
-```
-
-Then check:
-
-```text
-outputs/segmented_surface.vtp
-outputs/boundary_rings.vtp
-outputs/segmentation_result.json
-```
+Do not add outputs, new schemas, broad helpers, or architecture while validating this target.

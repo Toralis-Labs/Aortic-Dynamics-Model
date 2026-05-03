@@ -1,72 +1,8 @@
 # Target Outputs
 
-## Required Input Folder
+## Minimal Output Contract
 
-All input artifacts must live in:
-
-```text
-inputs/
-```
-
-Required inputs:
-
-```text
-inputs/surface_cleaned.vtp
-inputs/centerline_network.vtp
-inputs/centerline_network_metadata.json
-inputs/input_roles.json
-```
-
-This isolated geometry segmentation branch intentionally avoids VMTK branch tooling and VMTK compiled wrappers. It uses VTK + NumPy + input centerline/surface artifacts.
-
-## Required Input Role File
-
-The input role file must be neutral.
-
-It must not contain named branch labels.
-
-Expected structure:
-
-```json
-{
-  "aortic_body": {
-    "inlet_face_id": 2
-  },
-  "terminal_faces": [
-    3,
-    4,
-    5,
-    6,
-    7,
-    8,
-    9,
-    10,
-    11,
-    12
-  ],
-  "rules": {
-    "only_named_segment": "aortic_body",
-    "all_other_segments_are_anonymous": true,
-    "branch_label_prefix": "branch_",
-    "bifurcation_label_prefix": "bifurcation_",
-    "ring_label_prefix": "ring_"
-  }
-}
-```
-
-The code may use face IDs, terminal IDs, graph topology, and centerline routes.
-
-The code must not require named branch labels.
-
-## Required Output Folder
-
-All generated outputs must be written to:
-
-```text
-outputs/
-```
-
-Required outputs:
+Required output files only:
 
 ```text
 outputs/segmented_surface.vtp
@@ -74,11 +10,43 @@ outputs/boundary_rings.vtp
 outputs/segmentation_result.json
 ```
 
+Allowed optional diagnostic file:
+
+```text
+outputs/segmentation_diagnostics.json
+```
+
+The diagnostic file is allowed only if compact and bounded by `resources/05_validation_and_iteration.md`.
+
+No new required output files are allowed unless a future prompt explicitly requests them.
+
+Forbidden extra output files include:
+
+```text
+candidate_rings.vtp
+candidate_cuts.vtp
+debug_surface_sections.vtp
+all_candidates.vtp
+raw_cut_components.vtp
+branch_clouds.vtp
+ostium_debug.vtp
+```
+
+## Inputs
+
+Inputs must remain in:
+
+```text
+inputs/
+```
+
+Do not edit input files to satisfy this contract.
+
 ## outputs/segmented_surface.vtp
 
 This file must contain the full vascular surface.
 
-It must include cell-data arrays:
+Required and allowed cell-data arrays are exactly:
 
 ```text
 SegmentId
@@ -86,21 +54,25 @@ SegmentLabel
 SegmentColor
 ```
 
-Required meaning:
+No extra cell arrays are allowed unless a future prompt explicitly requests them.
+
+Forbidden arrays include:
 
 ```text
-SegmentId = integer segment identifier
-SegmentLabel = aortic_body or anonymous branch label
-SegmentColor = RGB color used for ParaView visualization
+anatomy-name arrays
+vessel-name arrays
+debug arrays
+candidate arrays
+surface-cut metric arrays
 ```
 
-The only readable anatomical label allowed in `SegmentLabel` is:
+The only anatomical value allowed in `SegmentLabel` is:
 
 ```text
 aortic_body
 ```
 
-All non-aortic-body labels must be anonymous:
+All other segment labels must be anonymous:
 
 ```text
 branch_001
@@ -108,17 +80,27 @@ branch_002
 branch_003
 ```
 
-The segmented surface must be directly openable in ParaView.
+The selected circular ring must affect surface cell assignment.
 
-The surface should be visually separable by `SegmentColor` or `SegmentId`.
+Surface cells associated with a child branch but lying proximal to the selected `branch_start` ring must be reassigned to the parent segment.
+
+If `segmented_surface.vtp` and `boundary_rings.vtp` disagree, the output status must be:
+
+```text
+requires_review
+```
+
+or:
+
+```text
+failed
+```
 
 ## outputs/boundary_rings.vtp
 
-This file must contain circular ring geometry.
+This file must contain only circular ring geometry for actual cut-boundaries.
 
-The rings represent actual cut-boundaries.
-
-This file must include cell-data arrays:
+Required and allowed cell-data arrays are exactly:
 
 ```text
 RingId
@@ -132,192 +114,147 @@ Confidence
 Status
 ```
 
-Expected ring labels:
+No extra ring arrays are allowed unless a future prompt explicitly requests them.
 
-```text
-ring_001
-ring_002
-ring_003
-```
+Do not put candidate metrics into `boundary_rings.vtp`.
 
-Expected ring types:
+Do not put large debug metadata into VTP arrays.
 
-```text
-aortic_body_start
-aortic_body_end
-branch_start
-branch_end
-parent_pre_bifurcation
-daughter_start
-```
+VTP files are for visual inspection and minimum segment/ring selection.
 
-For every branch segment, there should be a branch-start ring.
-
-For every bifurcation, the preferred representation is:
-
-```text
-one parent_pre_bifurcation ring
-one daughter_start ring for each daughter segment
-```
-
-The geometric distance between parent pre-bifurcation rings and daughter-start rings must be preserved when measurable.
-
-Do not collapse all rings into the same point unless the geometry genuinely has no measurable separation.
+Detailed candidate reasoning belongs only in compact JSON.
 
 ## outputs/segmentation_result.json
 
-This JSON must describe the result in a machine-readable way.
+This file must contain compact decision metadata.
 
-Required top-level structure:
-
-```json
-{
-  "status": "success | requires_review | failed",
-  "inputs": {},
-  "outputs": {},
-  "segments": [],
-  "boundary_rings": [],
-  "bifurcations": [],
-  "warnings": [],
-  "metrics": {}
-}
-```
-
-## Segment Object Contract
-
-Each segment object should include:
-
-```json
-{
-  "segment_id": 1,
-  "segment_label": "aortic_body",
-  "segment_type": "aortic_body | branch",
-  "parent_segment_id": null,
-  "child_segment_ids": [],
-  "proximal_ring_id": null,
-  "distal_ring_ids": [],
-  "cell_count": 0,
-  "status": "success | requires_review | failed",
-  "warnings": []
-}
-```
-
-For non-aortic-body branches:
-
-```json
-{
-  "segment_id": 2,
-  "segment_label": "branch_001",
-  "segment_type": "branch",
-  "parent_segment_id": 1,
-  "child_segment_ids": [],
-  "proximal_ring_id": 1,
-  "distal_ring_ids": [],
-  "cell_count": 0,
-  "status": "success",
-  "warnings": []
-}
-```
-
-## Boundary Ring Object Contract
-
-Each ring object should include:
-
-```json
-{
-  "ring_id": 1,
-  "ring_label": "ring_001",
-  "ring_type": "branch_start",
-  "center_xyz": [0.0, 0.0, 0.0],
-  "normal_xyz": [0.0, 0.0, 1.0],
-  "radius_mm": 1.0,
-  "source_segment_id": 2,
-  "parent_segment_id": 1,
-  "child_segment_id": 2,
-  "source_centerline_s_mm": 0.0,
-  "orientation_rule": "perpendicular_to_child_centerline_tangent",
-  "radius_rule": "local_equivalent_diameter_over_2",
-  "confidence": 1.0,
-  "status": "success",
-  "warnings": []
-}
-```
-
-## Bifurcation Object Contract
-
-Each bifurcation object should include:
-
-```json
-{
-  "bifurcation_id": 1,
-  "bifurcation_label": "bifurcation_001",
-  "parent_segment_id": 1,
-  "child_segment_ids": [2, 3],
-  "parent_pre_bifurcation_ring_id": 4,
-  "daughter_start_ring_ids": [5, 6],
-  "status": "success | requires_review | failed",
-  "warnings": []
-}
-```
-
-## Output Status Rules
-
-Use:
+Required top-level keys are exactly:
 
 ```text
-success
-```
-
-only when outputs are written and all required segment/ring information is available.
-
-Use:
-
-```text
-requires_review
-```
-
-when the code writes outputs but one or more rings are uncertain, low-confidence, visually questionable, or geometrically ambiguous.
-
-Use:
-
-```text
-failed
-```
-
-when required outputs cannot be written, required inputs are missing, the surface cannot be segmented, or the result is not usable.
-
-## Required Metrics
-
-The JSON should include metrics such as:
-
-```json
-{
-  "segment_count": 0,
-  "branch_count": 0,
-  "bifurcation_count": 0,
-  "ring_count": 0,
-  "surface_cell_count": 0,
-  "unassigned_cell_count": 0,
-  "requires_review_ring_count": 0,
-  "failed_ring_count": 0
-}
-```
-
-## Forbidden Output Concepts
-
-The output must not contain old named branch labels.
-
-The output must not contain clinical labels.
-
-The output must not contain downstream workflow fields.
-
-The output must remain focused on:
-
-```text
-aortic_body
-anonymous branch segments
+status
+inputs
+outputs
+segments
+boundary_rings
 bifurcations
-boundary rings
-surface segmentation
-validation status
+warnings
+metrics
+```
+
+No additional required top-level keys are allowed unless a future prompt explicitly requests them.
+
+## Segment Objects
+
+Segment objects must contain only:
+
+```text
+segment_id
+segment_label
+segment_type
+parent_segment_id
+child_segment_ids
+proximal_ring_id
+distal_ring_ids
+cell_count
+status
+warnings
+```
+
+## Boundary Ring Objects
+
+Boundary ring objects must contain the core ring fields plus compact selection metadata.
+
+Core fields:
+
+```text
+ring_id
+ring_label
+ring_type
+center_xyz
+normal_xyz
+radius_mm
+source_segment_id
+parent_segment_id
+child_segment_id
+source_centerline_s_mm
+orientation_rule
+radius_rule
+confidence
+status
+warnings
+```
+
+Allowed compact selection metadata:
+
+```text
+selection_algorithm
+topology_start_xyz
+selected_offset_mm
+search_max_mm
+candidate_count
+accepted_candidate_count
+selected_candidate_classification
+selected_radius_rule
+surface_cut_used
+backward_refinement_used
+cells_reassigned_to_parent_count
+candidate_summary
+```
+
+Required branch-start selection algorithm value:
+
+```text
+surface_validated_branch_start_ring_v1
+```
+
+Allowed compact `candidate_summary` fields:
+
+```text
+first_stable_offset_mm
+selected_offset_mm
+rejected_too_proximal_count
+invalid_cut_count
+fallback_used
+```
+
+Do not store raw candidate points.
+
+Do not store raw cut contour points.
+
+Do not store every plane-cut component.
+
+Do not store giant debug arrays.
+
+Do not store candidate metric arrays by default.
+
+## Bifurcation Objects
+
+Bifurcation objects must remain compact:
+
+```text
+bifurcation_id
+bifurcation_label
+parent_segment_id
+child_segment_ids
+parent_pre_bifurcation_ring_id
+daughter_start_ring_ids
+status
+warnings
+```
+
+## Metrics
+
+`metrics` must contain compact run-level counts only.
+
+Allowed metrics include:
+
+```text
+segment_count
+branch_count
+bifurcation_count
+ring_count
+surface_cell_count
+unassigned_cell_count
+requires_review_ring_count
+failed_ring_count
 ```

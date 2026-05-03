@@ -1,275 +1,47 @@
 # Codex Rules
 
-## Primary Instruction
+## Primary Rule
 
-Codex must solve one problem:
+Codex must solve only this current problem:
 
-> Produce a segmented vascular surface and circular cut-boundary rings that separate the aortic body and anonymous branch segments.
+```text
+Accurately place clean circular branch_start and bifurcation cut-boundary rings so branch segments begin at the correct ostium/cut boundary and do not include parent/aortic wall.
+```
+
+The current code target is:
+
+```text
+surface-validated branch_start ring selection
+surface assignment correction
+```
 
 ## Required Reading
 
-Before editing code, Codex must read:
+Before future code edits, Codex must read:
 
 ```text
+resources/README.md
 resources/01_problem.md
 resources/02_target_outputs.md
 resources/03_boundary_ring_contract.md
 resources/04_algorithm_strategy.md
 resources/05_validation_and_iteration.md
+resources/06_codex_rules.md
 ```
 
-## Files Codex May Edit
+Future code prompts must obey the resource folder.
 
-Codex may edit:
+## Resource Editing Rule
 
-```text
-step2_geometry_contract.py
-src/step2/geometry_contract.py
-src/common/paths.py
-src/common/geometry.py
-src/common/vtk_helpers.py
-src/common/json_io.py
-src/common/__init__.py
-```
+Codex must delete obsolete resource wording, not only append new wording.
 
-Codex may create or update:
+Resources must stay strict, short, and controlling.
 
-```text
-outputs/.gitkeep
-```
+## Output File Rules
 
-Codex may update resources only if the target contract changes intentionally.
+Codex must not add new output files unless a future prompt explicitly requests them.
 
-## Files Codex Must Not Reintroduce
-
-Codex must not recreate old pipeline or downstream files.
-
-Codex must not recreate:
-
-```text
-old architecture documents
-old clarification documents
-old implementation-plan documents
-old prompt dumps
-old downstream module folders
-old downstream entrypoint scripts
-old generated output folders
-old demo-model folders
-```
-
-Required paths are:
-
-```text
-inputs/
-outputs/
-resources/
-src/
-```
-
-## Forbidden Concepts
-
-Codex must not make the repository about:
-
-```text
-vessel naming
-clinical labels
-measurement extraction
-device matching
-simulation
-model training
-downstream workflow stages
-```
-
-## Forbidden Output Labels
-
-Codex must not output old named branch labels.
-
-The only anatomical segment label allowed is:
-
-```text
-aortic_body
-```
-
-## Allowed Output Labels
-
-Allowed labels:
-
-```text
-aortic_body
-branch_001
-branch_002
-branch_003
-bifurcation_001
-ring_001
-ring_002
-```
-
-## Path Rules
-
-Inputs must be loaded from:
-
-```text
-inputs/
-```
-
-Outputs must be written to:
-
-```text
-outputs/
-```
-
-Do not write required outputs to old generated-output paths.
-
-## Input Role Rules
-
-Use:
-
-```text
-inputs/input_roles.json
-```
-
-Do not use a face-name map.
-
-Do not require vessel names.
-
-The code may use:
-
-```text
-face IDs
-terminal IDs
-graph topology
-centerline routes
-surface geometry
-```
-
-## Dependency Rule
-
-This isolated geometry segmentation branch intentionally avoids VMTK branch tooling and VMTK compiled wrappers. It uses VTK + NumPy + input centerline/surface artifacts.
-
-Codex must not import or require VMTK in this branch.
-
-Codex must use VTK, NumPy, input centerline artifacts, input surface geometry, input roles, and local surface-cut or ring geometry.
-
-Final ring placement must be validated against surface geometry and parent-child segment assignment.
-
-Codex must not accept a branch-start ring only because:
-
-```text
-it is located at a centerline graph node
-the branch centerline begins there
-```
-
-Codex must use:
-
-```text
-surface_validated_branch_start_ring_v1
-```
-
-for branch-start rings.
-
-The branch centerline start is a search origin only.
-
-The final branch-start ring requires local surface-cut validation, circular candidate scoring, and parent-child surface assignment consistency.
-
-If branch-start placement falls back to the topology start point, the ring must be marked:
-
-```text
-requires_review
-```
-
-with:
-
-```text
-selected_candidate_classification = topology_fallback_requires_review
-surface_cut_used = false
-```
-
-Codex must validate final circular rings using:
-
-```text
-actual surface geometry
-centerline tangent direction
-local radius or diameter evidence
-parent-child surface assignment
-ring visibility in boundary_rings.vtp
-ring consistency with segmented_surface.vtp
-```
-
-If surface evidence and ring validation disagree, Codex must mark the relevant ring or segment as:
-
-```text
-requires_review
-```
-
-unless the code can refine the ring to a better surface-consistent position.
-
-## Boundary Ring Rules
-
-Circular rings are actual cut-boundaries.
-
-They are not decorative.
-
-For branch starts:
-
-```text
-ring normal = child branch tangent
-```
-
-For parent pre-bifurcation rings:
-
-```text
-ring normal = parent segment tangent
-```
-
-For daughter-start rings:
-
-```text
-ring normal = daughter segment tangent
-```
-
-Preferred radius:
-
-```text
-local equivalent diameter / 2
-```
-
-Fallback radius:
-
-```text
-centerline radius
-```
-
-A ring must not be marked successful unless it is consistent with both:
-
-```text
-surface geometry
-parent-child segment assignment
-```
-
-The selected branch-start offset must be used to update surface cell assignment so child cells proximal to the selected ring remain assigned to the parent segment.
-
-## Minimal Change Rule
-
-Codex must not rewrite the whole codebase unless explicitly instructed.
-
-For each iteration, Codex must identify one failure and make the smallest code change that addresses it.
-
-## Validation Required
-
-After every code change, Codex must run at least:
-
-```bash
-python -m py_compile step2_geometry_contract.py src/step2/geometry_contract.py
-python -m py_compile src/common/paths.py src/common/geometry.py src/common/json_io.py src/common/vtk_helpers.py
-```
-
-If the runtime environment supports the needed VTK and NumPy dependencies, Codex must run:
-
-```bash
-python step2_geometry_contract.py
-```
-
-Then Codex must check for:
+Required output files only:
 
 ```text
 outputs/segmented_surface.vtp
@@ -277,44 +49,151 @@ outputs/boundary_rings.vtp
 outputs/segmentation_result.json
 ```
 
-## Required Final Report From Codex
-
-Every Codex response after a code change must report:
+Allowed optional compact diagnostic file:
 
 ```text
-files changed
-what failure was targeted
-what logic changed
-what was not changed
-compile result
-runtime result if run
-output files produced
-remaining failures
-next recommended smallest change
+outputs/segmentation_diagnostics.json
 ```
 
-## Do Not Claim Success Without Evidence
-
-Codex must not say the task is complete unless:
+Forbidden debug output files include:
 
 ```text
-compile checks pass
-required outputs exist
-segmentation_result.json contains required fields
-VTP files are generated
-labels follow the allowed label rules
-rings are recorded in JSON
-ring placement was validated against surface geometry
+candidate_rings.vtp
+candidate_cuts.vtp
+debug_surface_sections.vtp
+all_candidates.vtp
+raw_cut_components.vtp
+branch_clouds.vtp
+ostium_debug.vtp
 ```
 
-If ParaView inspection is required but not performed, Codex must say so.
+## VTP Array Rules
 
-## Single-Problem Rule
-
-If Codex starts adding unrelated concepts, stop.
-
-The only problem is:
+`outputs/segmented_surface.vtp` must contain only:
 
 ```text
-anonymous vascular surface segmentation using circular cut-boundary rings
+SegmentId
+SegmentLabel
+SegmentColor
 ```
+
+`outputs/boundary_rings.vtp` must contain only:
+
+```text
+RingId
+RingLabel
+RingType
+ParentSegmentId
+ChildSegmentId
+SegmentId
+RadiusMm
+Confidence
+Status
+```
+
+Codex must not add new VTP arrays unless explicitly requested.
+
+Do not put candidate metrics or debug metadata into VTP arrays.
+
+## JSON Rules
+
+`outputs/segmentation_result.json` must contain only compact decision metadata.
+
+Required top-level keys only:
+
+```text
+status
+inputs
+outputs
+segments
+boundary_rings
+bifurcations
+warnings
+metrics
+```
+
+Codex must not add large JSON debug dumps.
+
+Codex must not store raw candidate points, raw cut contour points, every plane-cut component, or candidate metric arrays by default.
+
+## Algorithm Rules
+
+Codex must use:
+
+```text
+surface_validated_branch_start_ring_v1
+```
+
+For branch starts, the required strategy is:
+
+```text
+stable daughter section first
+then backward refinement
+then last clean candidate before parent contamination
+```
+
+The topology start is only a search origin.
+
+topology-only branch_start rings must be requires_review.
+
+Codex must not accept a `branch_start` ring as `success` when it is supported only by centerline topology.
+
+Codex must not accept the first valid-looking surface cut as final when a stable daughter section and backward refinement have not been performed.
+
+## Surface Assignment Rules
+
+The selected circular ring must update surface cell assignment.
+
+Surface cells associated with a child branch but lying proximal to the selected `branch_start` ring must be reassigned to the parent segment.
+
+If `segmented_surface.vtp` and `boundary_rings.vtp` disagree, mark:
+
+```text
+requires_review
+```
+
+or:
+
+```text
+failed
+```
+
+## Forbidden Expansion
+
+Codex must not add:
+
+```text
+VMTK
+vessel-name logic
+clinical labels
+device planning
+measurement extraction
+simulation
+machine learning
+new pipeline stages
+broad helper systems
+broad architecture rewrites
+extra labels
+extra debug files
+large diagnostics
+```
+
+Codex must not change label rules.
+
+Codex must not solve multiple problems at once.
+
+## Uncertainty Rule
+
+When uncertain, Codex must mark:
+
+```text
+requires_review
+```
+
+Codex must not add more outputs to hide or explain uncertainty.
+
+## Change Report Rule
+
+Every code change must report whether it changed the minimal output contract.
+
+If a code change modifies the minimal output contract, that is a failure unless a future prompt explicitly requested the contract change.
