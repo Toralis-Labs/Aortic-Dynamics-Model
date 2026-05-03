@@ -6,6 +6,8 @@ The code must solve one geometric segmentation problem:
 
 > Given a vascular lumen surface and centerline/topology input artifacts, separate the aortic body and every connected branch or bifurcation segment using clean circular cut-boundaries.
 
+This isolated geometry segmentation branch intentionally avoids VMTK branch tooling and VMTK compiled wrappers. It uses VTK + NumPy + input centerline/surface artifacts.
+
 This repository is not solving vessel naming.
 
 This repository is not solving clinical interpretation.

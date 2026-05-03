@@ -2,6 +2,8 @@
 
 This folder defines the rules for the geometry segmentation workspace.
 
+This isolated geometry segmentation branch intentionally avoids VMTK branch tooling and VMTK compiled wrappers. It uses VTK + NumPy + input centerline/surface artifacts.
+
 This branch solves one problem only:
 
 > Segment a vascular surface into an aortic body and anonymous connected branch segments using clean circular cut-boundaries.

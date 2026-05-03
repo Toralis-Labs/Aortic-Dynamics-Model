@@ -210,74 +210,40 @@ outputs/boundary_rings.vtp
 outputs/segmentation_result.json
 ```
 
-## VMTK Requirement And Role
+## Dependency Strategy
 
-VMTK is required by the current geometry segmentation implementation.
+This isolated geometry segmentation branch intentionally avoids VMTK branch tooling and VMTK compiled wrappers. It uses VTK + NumPy + input centerline/surface artifacts.
 
-The code must not silently bypass VMTK branch tooling.
-
-VMTK should be used to generate or validate the baseline branch/surface partition using split/grouped centerlines and branch clipping.
-
-However, VMTK is not the final authority for circular boundary-ring placement.
+VMTK branch tooling is intentionally out of scope for this isolated branch. The implementation uses VTK/NumPy centerline and surface-cut logic instead.
 
 The final authority is whether the circular ring correctly separates parent and child surface geometry.
 
 The correct strategy is:
 
 ```text
-VMTK branch/surface partition proposal
-+ centerline topology and tangent direction
+centerline topology and tangent direction
 + local surface evidence
 + circular ring candidate evaluation
++ parent-child surface assignment checks
 = final accepted boundary ring
 ```
 
 A ring must not be accepted only because it is located at a centerline graph node.
 
-A ring must not be accepted only because VMTK generated a group boundary.
-
 The ring must be checked against the actual surface and parent-child segment assignment.
-
-VMTK should help answer:
-
-```text
-what branch groups exist
-which surface cells likely belong to each branch
-where parent-child transitions are approximately located
-where bifurcation profiles or branch clipping boundaries may be located
-```
-
-VMTK should not be treated as answering, by itself:
-
-```text
-the final circular ring center
-the final circular ring radius
-the final circular ring confidence
-whether the ring is too proximal
-whether the ring is too distal
-whether the final segmentation is acceptable
-```
-
-If VMTK output and circular ring validation disagree, the result must be marked:
-
-```text
-requires_review
-```
-
-unless the code can refine the ring to a better surface-consistent position.
 
 ## Helper Tool Role
 
-Existing centerline/branch tooling may be used as a helper.
+Existing VTK, NumPy, and general Python centerline/surface helpers may be used.
 
 Allowed helper use:
 
 ```text
 initial branch grouping
 centerline splitting
-surface partition proposal
-branch clipping proposal
-branch section estimation
+surface partition estimate
+surface cut proposal
+branch section estimation from local surface evidence
 surface partition validation
 ```
 
@@ -295,14 +261,13 @@ For each branch:
 
 ```text
 1. Find the branch centerline path.
-2. Use VMTK branch tooling to generate or validate the baseline branch/surface partition.
-3. Estimate the branch origin region.
-4. Estimate a local diameter or radius.
-5. Place a circular ring perpendicular to the local branch tangent.
-6. Test whether the ring is too proximal or too distal.
-7. Test whether the ring is consistent with the actual surface and parent-child partition.
-8. Use the ring as the parent-child cut boundary.
-9. Record confidence and warnings.
+2. Estimate the branch origin region from centerline topology.
+3. Estimate a local diameter or radius from surface cuts or nearby surface points.
+4. Place a circular ring perpendicular to the local branch tangent.
+5. Test whether the ring is too proximal or too distal.
+6. Test whether the ring is consistent with the actual surface and parent-child partition.
+7. Use the ring as the parent-child cut boundary.
+8. Record confidence and warnings.
 ```
 
 For bifurcations:
@@ -310,12 +275,11 @@ For bifurcations:
 ```text
 1. Find the parent segment.
 2. Find daughter segments.
-3. Use VMTK branch/bifurcation information as a baseline proposal when available.
-4. Place a parent_pre_bifurcation ring on the parent.
-5. Place daughter_start rings on each daughter.
-6. Preserve the measurable distance between these rings.
-7. Validate the rings against the surface and parent-child partition.
-8. Record topology and ring IDs in JSON.
+3. Place a parent_pre_bifurcation ring on the parent.
+4. Place daughter_start rings on each daughter.
+5. Preserve the measurable distance between these rings.
+6. Validate the rings against the surface and parent-child partition.
+7. Record topology and ring IDs in JSON.
 ```
 
 ## Ring Candidate Acceptance Strategy
@@ -330,7 +294,7 @@ ring normal follows the local child or parent tangent
 ring radius is consistent with local branch size
 ring does not include obvious parent wall inside the child segment
 ring does not start too far distal inside the child branch
-ring is consistent with the VMTK baseline branch/surface partition
+ring is consistent with local surface evidence
 ring is consistent with final surface cell assignment
 ring is visible in boundary_rings.vtp
 ring is recorded in segmentation_result.json
@@ -343,8 +307,6 @@ requires_review
 ```
 
 If a ring is only supported by centerline topology and not by surface evidence, it should not be marked successful.
-
-If a ring is only supported by VMTK group boundary output and not by surface-consistency checks, it should not be marked successful.
 
 ## Forbidden Algorithm Goals
 
@@ -362,7 +324,7 @@ A minimal acceptable version must:
 
 ```text
 load inputs
-use VMTK branch tooling as part of partitioning or validation
+use VTK/NumPy centerline and surface-cut logic
 write segmented_surface.vtp
 write boundary_rings.vtp
 write segmentation_result.json
@@ -382,7 +344,6 @@ uses rings as actual cut boundaries
 preserves parent-child topology
 handles branches of branches
 handles bifurcations with parent and daughter rings
-uses VMTK branch/surface partition as a baseline proposal
 validates rings against actual surface geometry
 reports confidence and failure modes
 ```
@@ -393,11 +354,10 @@ A best version:
 
 ```text
 places every branch and bifurcation ring correctly
-uses VMTK branch tooling without blindly trusting it
 avoids parent wall contamination
 avoids overly distal branch starts
 keeps rings circular and visually clean
 preserves measurable distance between parent and daughter bifurcation rings
 creates ParaView-friendly outputs every run
-records disagreements between VMTK output and ring validation
+records disagreements between surface evidence and ring validation
 ```

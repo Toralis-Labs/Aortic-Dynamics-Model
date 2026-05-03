@@ -17,6 +17,8 @@ inputs/centerline_network_metadata.json
 inputs/input_roles.json
 ```
 
+This isolated geometry segmentation branch intentionally avoids VMTK branch tooling and VMTK compiled wrappers. It uses VTK + NumPy + input centerline/surface artifacts.
+
 ## Required Input Role File
 
 The input role file must be neutral.

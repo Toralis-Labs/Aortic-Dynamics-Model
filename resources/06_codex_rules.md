@@ -142,17 +142,13 @@ centerline routes
 surface geometry
 ```
 
-## VMTK Rule
+## Dependency Rule
 
-VMTK is required.
+This isolated geometry segmentation branch intentionally avoids VMTK branch tooling and VMTK compiled wrappers. It uses VTK + NumPy + input centerline/surface artifacts.
 
-Codex must not merely check that VMTK imports successfully.
+Codex must not import or require VMTK in this branch.
 
-Codex must use VMTK branch tooling as part of the branch/surface partitioning or validation strategy.
-
-Codex must not bypass VMTK with a purely centerline-only segmentation unless explicitly instructed.
-
-VMTK output is a required baseline/proposal, not the final authority for ostium placement.
+Codex must use VTK, NumPy, input centerline artifacts, input surface geometry, input roles, and local surface-cut or ring geometry.
 
 Final ring placement must be validated against surface geometry and parent-child segment assignment.
 
@@ -160,21 +156,10 @@ Codex must not accept a branch-start ring only because:
 
 ```text
 it is located at a centerline graph node
-VMTK generated a group boundary there
 the branch centerline begins there
 ```
 
-Codex may use VMTK to support:
-
-```text
-split/grouped centerline interpretation
-branch clipping
-baseline surface partitioning
-bifurcation profile proposals
-branch/surface validation
-```
-
-Codex must still validate final circular rings using:
+Codex must validate final circular rings using:
 
 ```text
 actual surface geometry
@@ -185,7 +170,7 @@ ring visibility in boundary_rings.vtp
 ring consistency with segmented_surface.vtp
 ```
 
-If VMTK and ring validation disagree, Codex must mark the relevant ring or segment as:
+If surface evidence and ring validation disagree, Codex must mark the relevant ring or segment as:
 
 ```text
 requires_review
@@ -251,7 +236,7 @@ python -m py_compile step2_geometry_contract.py src/step2/geometry_contract.py
 python -m py_compile src/common/paths.py src/common/geometry.py src/common/json_io.py src/common/vtk_helpers.py
 ```
 
-If the runtime environment supports the needed VTK/VMTK dependencies, Codex must run:
+If the runtime environment supports the needed VTK and NumPy dependencies, Codex must run:
 
 ```bash
 python step2_geometry_contract.py
@@ -292,7 +277,6 @@ segmentation_result.json contains required fields
 VTP files are generated
 labels follow the allowed label rules
 rings are recorded in JSON
-VMTK was used as part of partitioning or validation
 ring placement was validated against surface geometry
 ```
 

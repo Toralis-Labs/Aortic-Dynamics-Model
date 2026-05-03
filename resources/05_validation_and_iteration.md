@@ -6,6 +6,10 @@ Every code change must be judged against the same target:
 
 > Does the code produce a visually usable segmented surface and circular cut-boundary rings that correctly separate parent and child segments?
 
+This isolated geometry segmentation branch intentionally avoids VMTK branch tooling and VMTK compiled wrappers. It uses VTK + NumPy + input centerline/surface artifacts.
+
+VMTK availability is not a success or failure criterion for this branch.
+
 Do not judge progress by whether the code preserves old pipeline behavior.
 
 Do not judge progress by vessel names.

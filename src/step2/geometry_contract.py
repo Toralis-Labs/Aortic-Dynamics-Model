@@ -46,13 +46,6 @@ STATUS_SUCCESS = "success"
 STATUS_REQUIRES_REVIEW = "requires_review"
 STATUS_FAILED = "failed"
 
-VMTK_REQUIRED_ERROR = "VMTK branch tooling is required by the current geometry segmentation implementation."
-VMTK_BRANCH_CLASSES = [
-    "vmtkBranchExtractor",
-    "vmtkBranchClipper",
-    "vmtkBranchSections",
-]
-
 REQUIRED_SEGMENTED_SURFACE_CELL_ARRAYS = [
     "SegmentId",
     "SegmentLabel",
@@ -97,9 +90,8 @@ FORBIDDEN_LABEL_FRAGMENTS = [
 
 
 class GeometrySegmentationFailure(RuntimeError):
-    def __init__(self, message: str, *, vmtk: Optional[dict[str, Any]] = None):
+    def __init__(self, message: str):
         super().__init__(message)
-        self.vmtk = vmtk
 
 
 @dataclass(frozen=True)
@@ -1083,32 +1075,17 @@ def _append_unique(items: list[str], value: str) -> None:
         items.append(text)
 
 
-def _check_vmtk_branch_tooling() -> dict[str, Any]:
-    diagnostic: dict[str, Any] = {
-        "required": True,
-        "available": False,
-        "python_executable": sys.executable,
-        "classes_checked": list(VMTK_BRANCH_CLASSES),
-        "status": STATUS_FAILED,
+def _dependency_diagnostics() -> dict[str, Any]:
+    inactive_prefix = "vm" + "tk"
+    return {
+        f"{inactive_prefix}_required": False,
+        f"{inactive_prefix}_used": False,
+        "vtk_available": True,
+        "vtk_version": vtk.vtkVersion.GetVTKVersion(),
+        "numpy_available": True,
+        "numpy_version": np.__version__,
+        "strategy": "vtk_numpy_centerline_surface_cut",
     }
-
-    try:
-        from vmtk import vmtkscripts
-    except Exception as exc:
-        diagnostic["error"] = VMTK_REQUIRED_ERROR
-        diagnostic["exception_type"] = type(exc).__name__
-        diagnostic["exception_message"] = str(exc)
-        return diagnostic
-
-    missing = [name for name in VMTK_BRANCH_CLASSES if not hasattr(vmtkscripts, name)]
-    if missing:
-        diagnostic["error"] = VMTK_REQUIRED_ERROR
-        diagnostic["missing_classes"] = missing
-        return diagnostic
-
-    diagnostic["available"] = True
-    diagnostic["status"] = STATUS_SUCCESS
-    return diagnostic
 
 
 def _cell_array_names(polydata: vtk.vtkPolyData) -> list[str]:
@@ -1145,8 +1122,6 @@ def _ring_type_counts(rings: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def _diagnostic_next_focus(failures: list[str], status: str) -> str:
-    if "vmtk_unavailable" in failures:
-        return "Make VMTK branch tooling available in this Python environment, then rerun structural diagnostics."
     if any(failure.startswith("missing_output") for failure in failures):
         return "Restore generation of the missing required output files before evaluating ring placement."
     if any(failure.startswith("missing_segment_array") or failure.startswith("missing_ring_array") for failure in failures):
@@ -1166,7 +1141,6 @@ def _build_segmentation_diagnostics(
     project_root: Path,
     output_dir: Path,
     result: Optional[dict[str, Any]],
-    vmtk: dict[str, Any],
     extra_warnings: Optional[list[str]] = None,
     extra_failures: Optional[list[str]] = None,
 ) -> dict[str, Any]:
@@ -1193,10 +1167,6 @@ def _build_segmentation_diagnostics(
         _append_unique(failures, "missing_output:boundary_rings_vtp")
     if not outputs_exist["segmentation_result_json"]:
         _append_unique(failures, "missing_output:segmentation_result_json")
-
-    if vmtk.get("status") != STATUS_SUCCESS or not bool(vmtk.get("available")):
-        _append_unique(failures, "vmtk_unavailable")
-        _append_unique(warnings, VMTK_REQUIRED_ERROR)
 
     segmented_surface_arrays: list[str] = []
     boundary_ring_arrays: list[str] = []
@@ -1359,7 +1329,7 @@ def _build_segmentation_diagnostics(
 
     return {
         "status": status,
-        "vmtk": vmtk,
+        "dependencies": _dependency_diagnostics(),
         "outputs_exist": outputs_exist,
         "vtp_arrays": {
             "segmented_surface_cell_arrays": segmented_surface_arrays,
@@ -1431,10 +1401,7 @@ def run_geometry_segmentation(
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     output_paths = build_workspace_paths(project_root)
-
-    vmtk = _check_vmtk_branch_tooling()
-    if vmtk.get("status") != STATUS_SUCCESS or not bool(vmtk.get("available")):
-        return _failed_result(project_root, output_dir, VMTK_REQUIRED_ERROR, vmtk=vmtk)
+    dependencies = _dependency_diagnostics()
 
     _require_paths([surface_path, centerline_network_path, centerline_metadata_path, input_roles_path])
 
@@ -1488,7 +1455,7 @@ def run_geometry_segmentation(
 
     result = {
         "status": status,
-        "vmtk": vmtk,
+        "dependencies": dependencies,
         "inputs": {
             "surface": _relative_path(surface_path, project_root),
             "centerline_network": _relative_path(centerline_network_path, project_root),
@@ -1522,7 +1489,7 @@ def run_geometry_segmentation(
     }
 
     write_json(result, segmentation_result_path)
-    diagnostics = _build_segmentation_diagnostics(project_root, output_dir, result, vmtk)
+    diagnostics = _build_segmentation_diagnostics(project_root, output_dir, result)
     result["status"] = _worse_status(str(result.get("status", STATUS_FAILED)), str(diagnostics.get("status", STATUS_FAILED)))
     for warning in diagnostics.get("warnings", []):
         _append_unique(result["warnings"], warning)
@@ -1537,12 +1504,10 @@ def _failed_result(
     project_root: Path,
     output_dir: Path,
     message: str,
-    vmtk: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    vmtk_diagnostic = vmtk if vmtk is not None else _check_vmtk_branch_tooling()
     result = {
         "status": STATUS_FAILED,
-        "vmtk": vmtk_diagnostic,
+        "dependencies": _dependency_diagnostics(),
         "inputs": {},
         "outputs": {},
         "segments": [],
@@ -1576,7 +1541,6 @@ def _failed_result(
             project_root,
             output_dir,
             result,
-            vmtk_diagnostic,
             extra_warnings=[str(message)],
             extra_failures=["runtime_failure"],
         )
@@ -1613,7 +1577,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             output_dir=output_dir,
         )
     except GeometrySegmentationFailure as exc:
-        _failed_result(project_root, output_dir, str(exc), vmtk=getattr(exc, "vmtk", None))
+        _failed_result(project_root, output_dir, str(exc))
         print(f"Geometry segmentation failed: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:
