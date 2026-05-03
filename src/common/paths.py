@@ -5,28 +5,46 @@ from pathlib import Path
 
 
 @dataclass(frozen=True)
-class PipelinePaths:
+class WorkspacePaths:
     project_root: Path
-    output_root: Path
-    step1_dir: Path
-    step2_dir: Path
-    default_input_vtp: Path
-    default_face_map: Path
+    input_dir: Path
+    output_dir: Path
+
+    surface_vtp: Path
+    centerline_network_vtp: Path
+    centerline_metadata_json: Path
+    input_roles_json: Path
+
+    segmented_surface_vtp: Path
+    boundary_rings_vtp: Path
+    segmentation_result_json: Path
 
 
-def build_pipeline_paths(project_root: str | Path) -> PipelinePaths:
+def build_workspace_paths(project_root: str | Path) -> WorkspacePaths:
     root = Path(project_root).resolve()
-    output = root / "Output files"
-    return PipelinePaths(
+    input_dir = root / "inputs"
+    output_dir = root / "outputs"
+
+    return WorkspacePaths(
         project_root=root,
-        output_root=output,
-        step1_dir=output / "STEP1",
-        step2_dir=output / "STEP2",
-        default_input_vtp=root / "0044_H_ABAO_AAA" / "0156_0001.vtp",
-        default_face_map=root / "0044_H_ABAO_AAA" / "face_id_to_name.json",
+        input_dir=input_dir,
+        output_dir=output_dir,
+        surface_vtp=input_dir / "surface_cleaned.vtp",
+        centerline_network_vtp=input_dir / "centerline_network.vtp",
+        centerline_metadata_json=input_dir / "centerline_network_metadata.json",
+        input_roles_json=input_dir / "input_roles.json",
+        segmented_surface_vtp=output_dir / "segmented_surface.vtp",
+        boundary_rings_vtp=output_dir / "boundary_rings.vtp",
+        segmentation_result_json=output_dir / "segmentation_result.json",
     )
 
 
 def script_project_root(script_file: str | Path) -> Path:
     return Path(script_file).resolve().parent
 
+
+# Temporary compatibility alias.
+# Remove this after src/step2/geometry_contract.py is refactored to call
+# build_workspace_paths directly.
+def build_pipeline_paths(project_root: str | Path) -> WorkspacePaths:
+    return build_workspace_paths(project_root)

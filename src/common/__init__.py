@@ -1,2 +1,1 @@
-"""Common helpers for pipeline scripts."""
-
+"""Shared helpers for the geometry segmentation engine."""

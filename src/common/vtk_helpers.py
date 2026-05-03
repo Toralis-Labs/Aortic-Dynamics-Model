@@ -14,6 +14,7 @@ def read_vtp(path: str | Path) -> vtk.vtkPolyData:
     reader = vtk.vtkXMLPolyDataReader()
     reader.SetFileName(str(path))
     reader.Update()
+
     output = vtk.vtkPolyData()
     output.DeepCopy(reader.GetOutput())
     return output
@@ -22,23 +23,28 @@ def read_vtp(path: str | Path) -> vtk.vtkPolyData:
 def write_vtp(polydata: vtk.vtkPolyData, path: str | Path, binary: bool = True) -> None:
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
     writer = vtk.vtkXMLPolyDataWriter()
     writer.SetFileName(str(out_path))
     writer.SetInputData(polydata)
+
     if binary:
         writer.SetDataModeToBinary()
     else:
         writer.SetDataModeToAscii()
+
     if writer.Write() != 1:
         raise RuntimeError(f"Failed to write VTP: {out_path}")
 
 
 def array_names(attrs: Any) -> list[str]:
     names: list[str] = []
+
     for idx in range(attrs.GetNumberOfArrays()):
         arr = attrs.GetArray(idx)
         if arr is not None:
             names.append(str(arr.GetName()))
+
     return names
 
 
@@ -82,22 +88,60 @@ def clone_geometry_only(polydata: vtk.vtkPolyData) -> vtk.vtkPolyData:
 def add_int_cell_array(polydata: vtk.vtkPolyData, name: str, values: Iterable[int]) -> None:
     arr = vtk.vtkIntArray()
     arr.SetName(name)
+
     vals = list(values)
     arr.SetNumberOfComponents(1)
     arr.SetNumberOfTuples(len(vals))
+
     for idx, value in enumerate(vals):
         arr.SetValue(idx, int(value))
+
     polydata.GetCellData().AddArray(arr)
 
 
-def add_uchar3_cell_array(polydata: vtk.vtkPolyData, name: str, values: Iterable[tuple[int, int, int]]) -> None:
+def add_float_cell_array(polydata: vtk.vtkPolyData, name: str, values: Iterable[float]) -> None:
+    arr = vtk.vtkDoubleArray()
+    arr.SetName(name)
+
+    vals = list(values)
+    arr.SetNumberOfComponents(1)
+    arr.SetNumberOfTuples(len(vals))
+
+    for idx, value in enumerate(vals):
+        arr.SetValue(idx, float(value))
+
+    polydata.GetCellData().AddArray(arr)
+
+
+def add_string_cell_array(polydata: vtk.vtkPolyData, name: str, values: Iterable[str]) -> None:
+    arr = vtk.vtkStringArray()
+    arr.SetName(name)
+
+    vals = list(values)
+    arr.SetNumberOfComponents(1)
+    arr.SetNumberOfTuples(len(vals))
+
+    for idx, value in enumerate(vals):
+        arr.SetValue(idx, str(value))
+
+    polydata.GetCellData().AddArray(arr)
+
+
+def add_uchar3_cell_array(
+    polydata: vtk.vtkPolyData,
+    name: str,
+    values: Iterable[tuple[int, int, int]],
+) -> None:
     arr = vtk.vtkUnsignedCharArray()
     arr.SetName(name)
     arr.SetNumberOfComponents(3)
+
     vals = list(values)
     arr.SetNumberOfTuples(len(vals))
+
     for idx, rgb in enumerate(vals):
         arr.SetTuple3(idx, int(rgb[0]), int(rgb[1]), int(rgb[2]))
+
     polydata.GetCellData().AddArray(arr)
     polydata.GetCellData().SetActiveScalars(name)
 
@@ -105,74 +149,146 @@ def add_uchar3_cell_array(polydata: vtk.vtkPolyData, name: str, values: Iterable
 def add_int_point_array(polydata: vtk.vtkPolyData, name: str, values: Iterable[int]) -> None:
     arr = vtk.vtkIntArray()
     arr.SetName(name)
+
     vals = list(values)
     arr.SetNumberOfComponents(1)
     arr.SetNumberOfTuples(len(vals))
+
     for idx, value in enumerate(vals):
         arr.SetValue(idx, int(value))
+
     polydata.GetPointData().AddArray(arr)
 
 
 def build_polyline_polydata(points: np.ndarray) -> vtk.vtkPolyData:
     pts_np = np.asarray(points, dtype=float)
+
     vtk_points = vtk.vtkPoints()
     vtk_points.SetNumberOfPoints(int(pts_np.shape[0]))
+
     for idx, p in enumerate(pts_np):
         vtk_points.SetPoint(idx, float(p[0]), float(p[1]), float(p[2]))
+
     polyline = vtk.vtkPolyLine()
     polyline.GetPointIds().SetNumberOfIds(int(pts_np.shape[0]))
+
     for idx in range(int(pts_np.shape[0])):
         polyline.GetPointIds().SetId(idx, idx)
+
     cells = vtk.vtkCellArray()
     cells.InsertNextCell(polyline)
+
     out = vtk.vtkPolyData()
     out.SetPoints(vtk_points)
     out.SetLines(cells)
+
     return out
 
 
-def build_segment_point_locator(segment_points: list[tuple[int, np.ndarray]]) -> tuple[vtk.vtkStaticPointLocator, vtk.vtkPolyData]:
+def build_regular_polygon_ring_polydata(
+    center: Iterable[float],
+    normal: Iterable[float],
+    radius: float,
+    number_of_sides: int = 96,
+    generate_polygon: bool = False,
+) -> vtk.vtkPolyData:
+    source = vtk.vtkRegularPolygonSource()
+    source.SetCenter(float(center[0]), float(center[1]), float(center[2]))
+    source.SetNormal(float(normal[0]), float(normal[1]), float(normal[2]))
+    source.SetRadius(float(radius))
+    source.SetNumberOfSides(int(max(12, number_of_sides)))
+
+    if generate_polygon:
+        source.GeneratePolygonOn()
+    else:
+        source.GeneratePolygonOff()
+
+    source.GeneratePolylineOn()
+    source.Update()
+
+    out = vtk.vtkPolyData()
+    out.DeepCopy(source.GetOutput())
+    return out
+
+
+def append_polydata(items: Iterable[vtk.vtkPolyData]) -> vtk.vtkPolyData:
+    append = vtk.vtkAppendPolyData()
+
+    count = 0
+    for item in items:
+        if item is None:
+            continue
+        if item.GetNumberOfPoints() == 0:
+            continue
+        append.AddInputData(item)
+        count += 1
+
+    append.Update()
+
+    out = vtk.vtkPolyData()
+    if count == 0:
+        return out
+
+    out.DeepCopy(append.GetOutput())
+    return out
+
+
+def build_segment_point_locator(
+    segment_points: list[tuple[int, np.ndarray]],
+) -> tuple[vtk.vtkStaticPointLocator, vtk.vtkPolyData]:
     vtk_points = vtk.vtkPoints()
     segment_ids: list[int] = []
+
     for segment_id, pts in segment_points:
         for p in np.asarray(pts, dtype=float):
             vtk_points.InsertNextPoint(float(p[0]), float(p[1]), float(p[2]))
             segment_ids.append(int(segment_id))
+
     pd = vtk.vtkPolyData()
     pd.SetPoints(vtk_points)
     add_int_point_array(pd, "SegmentId", segment_ids)
+
     locator = vtk.vtkStaticPointLocator()
     locator.SetDataSet(pd)
     locator.BuildLocator()
+
     return locator, pd
 
 
 def segment_color(segment_id: int) -> tuple[int, int, int]:
     if int(segment_id) <= 0:
         return (128, 128, 128)
-    hue = ((int(segment_id) * 0.61803398875) % 1.0)
+
+    hue = (int(segment_id) * 0.61803398875) % 1.0
     r, g, b = colorsys.hsv_to_rgb(hue, 0.70, 0.95)
+
     return (int(round(r * 255)), int(round(g * 255)), int(round(b * 255)))
 
 
 def triangle_area(points: np.ndarray) -> float:
     pts = np.asarray(points, dtype=float)
+
     if pts.shape[0] < 3:
         return 0.0
+
     if pts.shape[0] == 3:
         return 0.5 * float(np.linalg.norm(np.cross(pts[1] - pts[0], pts[2] - pts[0])))
+
     anchor = pts[0]
     area = 0.0
+
     for idx in range(1, pts.shape[0] - 1):
         area += 0.5 * float(np.linalg.norm(np.cross(pts[idx] - anchor, pts[idx + 1] - anchor)))
+
     return area if math.isfinite(area) else 0.0
 
 
 def cell_points(polydata: vtk.vtkPolyData, cell_id: int) -> np.ndarray:
     cell = polydata.GetCell(int(cell_id))
     ids = cell.GetPointIds()
+
     pts = []
     for idx in range(ids.GetNumberOfIds()):
         pts.append(polydata.GetPoint(ids.GetId(idx)))
-    return np.asarray(pts, dtype=float)
 
+    return np.asarray(pts, dtype=float)

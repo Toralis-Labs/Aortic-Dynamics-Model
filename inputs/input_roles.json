@@ -1,57 +1,23 @@
 {
-  "2": {
-    "name": "abdominal_aorta_inlet",
-    "cap_id": 1,
-    "terminal_type": "inlet"
+  "aortic_body": {
+    "inlet_face_id": 2
   },
-  "3": {
-    "name": "celiac_branch",
-    "cap_id": 2,
-    "terminal_type": "outlet"
-  },
-  "4": {
-    "name": "celiac_artery",
-    "cap_id": 2,
-    "terminal_type": "outlet"
-  },
-  "5": {
-    "name": "left_external_iliac",
-    "cap_id": 2,
-    "terminal_type": "outlet"
-  },
-  "6": {
-    "name": "right_external_iliac",
-    "cap_id": 2,
-    "terminal_type": "outlet"
-  },
-  "7": {
-    "name": "inferior_mesenteric_artery",
-    "cap_id": 2,
-    "terminal_type": "outlet"
-  },
-  "8": {
-    "name": "left_internal_iliac",
-    "cap_id": 2,
-    "terminal_type": "outlet"
-  },
-  "9": {
-    "name": "right_internal_iliac",
-    "cap_id": 2,
-    "terminal_type": "outlet"
-  },
-  "10": {
-    "name": "left_renal_artery",
-    "cap_id": 2,
-    "terminal_type": "outlet"
-  },
-  "11": {
-    "name": "right_renal_artery",
-    "cap_id": 2,
-    "terminal_type": "outlet"
-  },
-  "12": {
-    "name": "superior_mesenteric_artery",
-    "cap_id": 2,
-    "terminal_type": "outlet"
+  "terminal_faces": [
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12
+  ],
+  "rules": {
+    "only_named_segment": "aortic_body",
+    "all_other_segments_are_anonymous": true,
+    "branch_label_prefix": "branch_",
+    "bifurcation_label_prefix": "bifurcation_"
   }
 }
