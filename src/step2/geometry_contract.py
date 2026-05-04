@@ -64,10 +64,7 @@ REQUIRED_BOUNDARY_RING_CELL_ARRAYS = [
     "Status",
 ]
 DEFAULT_VISIBLE_RING_TYPES = {
-    "aortic_body_start",
-    "aortic_body_end",
     "branch_start",
-    "parent_pre_bifurcation",
 }
 REQUIRED_RESULT_KEYS = [
     "status",
@@ -111,7 +108,8 @@ MAX_REJECT_PARENT_CONTAMINATION = 0.45
 MAX_STABLE_RADIUS_SPREAD_RATIO = 0.45
 MAX_CLEAN_RADIUS_RATIO = 1.40
 MAX_ZERO_OFFSET_RADIUS_RATIO_DELTA = 0.20
-RING_PLANE_ASSIGNMENT_TOLERANCE_MM = 0.20
+RING_PLANE_ASSIGNMENT_TOLERANCE_MM = 0.10
+HIGH_AMBIGUITY_FRACTION = 0.05
 
 
 class GeometrySegmentationFailure(RuntimeError):
@@ -218,6 +216,20 @@ class BranchStartSelection:
     status: str
     warnings: list[str]
     metadata: dict[str, Any]
+
+
+@dataclass
+class BranchRingClipContext:
+    ring: BoundaryRing
+    segment: GeometrySegment
+    parent_segment_id: int
+    child_segment_id: int
+    center: np.ndarray
+    child_side_normal: np.ndarray
+    selected_s_mm: float
+    corridor_radius_limit_mm: float
+    corridor_s_min_mm: float
+    corridor_s_max_mm: float
 
 
 def _as_finite_vector(value: Any, fallback: Iterable[float]) -> np.ndarray:
@@ -1473,6 +1485,7 @@ def _surface_validated_branch_start_ring_v1(
             "selected_radius_rule": "estimated_fallback_requires_review",
             "surface_cut_used": False,
             "backward_refinement_used": bool(backward_refinement_used),
+            "zero_offset_proof_passed": False,
             "cells_reassigned_to_parent_count": 0,
             "surface_assignment_adjusted": False,
             "candidate_summary": _candidate_summary(
@@ -1573,6 +1586,7 @@ def _surface_validated_branch_start_ring_v1(
         "selected_radius_rule": selected_radius_rule,
         "surface_cut_used": True,
         "backward_refinement_used": bool(backward_refinement_used),
+        "zero_offset_proof_passed": bool(zero_proof_passed),
         "cells_reassigned_to_parent_count": 0,
         "surface_assignment_adjusted": False,
         "candidate_summary": _candidate_summary(
@@ -1926,8 +1940,28 @@ def _sync_ring_polydata_contract_arrays(ring: BoundaryRing) -> None:
     _set_uniform_string_cell_array(ring.polydata, "Status", ring.status)
 
 
+def _ring_zero_offset_unproven(ring: BoundaryRing) -> bool:
+    selected_offset = _safe_float(
+        ring.metadata.get("selected_offset_mm", ring.source_centerline_s_mm),
+        float(ring.source_centerline_s_mm),
+    )
+    proof = bool(ring.metadata.get("zero_offset_proof_passed", False))
+    summary = ring.metadata.get("candidate_summary")
+    if isinstance(summary, dict):
+        proof = proof or bool(summary.get("zero_offset_proof_passed", False))
+    return bool(selected_offset <= ZERO_OFFSET_TOLERANCE_MM and not proof)
+
+
+def _ring_visible_by_default(ring: BoundaryRing) -> bool:
+    if ring.ring_type not in DEFAULT_VISIBLE_RING_TYPES:
+        return False
+    if ring.ring_type == "branch_start" and _ring_zero_offset_unproven(ring):
+        return False
+    return True
+
+
 def _visible_boundary_rings(rings: list[BoundaryRing]) -> list[BoundaryRing]:
-    return [ring for ring in rings if ring.ring_type in DEFAULT_VISIBLE_RING_TYPES]
+    return [ring for ring in rings if _ring_visible_by_default(ring)]
 
 
 def _visible_boundary_ring_polydata(rings: list[BoundaryRing]) -> vtk.vtkPolyData:
@@ -2022,6 +2056,44 @@ def _child_side_plane(
     return ring_center, ring_normal, child_side_sign
 
 
+def _branch_corridor_radius_limit(ring: BoundaryRing) -> float:
+    radius = max(float(ring.radius_mm), RING_PLANE_ASSIGNMENT_TOLERANCE_MM)
+    return float(max(1.25 * radius, radius + RING_PLANE_ASSIGNMENT_TOLERANCE_MM))
+
+
+def _branch_ring_clip_context(
+    ring: BoundaryRing,
+    segment: GeometrySegment,
+    parent_segment_id: int,
+) -> BranchRingClipContext:
+    ring_center, ring_normal, child_side_sign = _child_side_plane(ring, segment)
+    selected_s = float(np.clip(float(ring.source_centerline_s_mm), 0.0, polyline_length(segment.points)))
+    radius_limit = _branch_corridor_radius_limit(ring)
+    local_window = max(2.0, 3.0 * max(float(ring.radius_mm), RING_PLANE_ASSIGNMENT_TOLERANCE_MM))
+    return BranchRingClipContext(
+        ring=ring,
+        segment=segment,
+        parent_segment_id=int(parent_segment_id),
+        child_segment_id=int(ring.child_segment_id or ring.source_segment_id),
+        center=ring_center,
+        child_side_normal=unit(ring_normal * child_side_sign),
+        selected_s_mm=selected_s,
+        corridor_radius_limit_mm=radius_limit,
+        corridor_s_min_mm=max(0.0, selected_s - max(0.25, 2.0 * RING_PLANE_ASSIGNMENT_TOLERANCE_MM)),
+        corridor_s_max_mm=min(polyline_length(segment.points), selected_s + local_window),
+    )
+
+
+def _center_in_branch_corridor(context: BranchRingClipContext, center: np.ndarray, *, relaxed: bool = False) -> bool:
+    projected_s, distance = _project_point_to_polyline_s(context.segment.points, center)
+    if projected_s < context.corridor_s_min_mm or projected_s > context.corridor_s_max_mm:
+        return False
+    limit = context.corridor_radius_limit_mm
+    if relaxed:
+        limit = max(1.75 * limit, limit + 0.25)
+    return bool(distance <= limit)
+
+
 def _distal_child_seed_cell(
     segment: GeometrySegment,
     centers: np.ndarray,
@@ -2070,10 +2142,14 @@ def _empty_ring_plane_assignment_stats() -> dict[str, Any]:
     return {
         "surface_assignment_mode": "ring_plane_gated",
         "ring_plane_assignment_tolerance_mm": float(RING_PLANE_ASSIGNMENT_TOLERANCE_MM),
+        "clip_boundary_used": False,
+        "clip_boundary_required": False,
+        "clip_boundary_unresolved": False,
         "cells_reassigned_to_parent_count": 0,
         "cells_reassigned_to_child_count": 0,
         "cells_ambiguous_near_ring_count": 0,
         "ring_plane_parent_side_violation_count": 0,
+        "neighbor_contour_leak_count": 0,
         "connected_component_cleanup_reassigned_count": 0,
         "ring_surface_consistency_status": STATUS_SUCCESS,
     }
@@ -2111,7 +2187,9 @@ def _apply_ring_plane_gated_surface_assignment(
             parent_id = 1
 
         stats = _empty_ring_plane_assignment_stats()
-        ring_center, ring_normal, child_side_sign = _child_side_plane(ring, segment)
+        clip_context = _branch_ring_clip_context(ring, segment, parent_id)
+        ring_center = clip_context.center
+        child_side_normal = clip_context.child_side_normal
 
         child_cell_ids = {
             int(cell_id)
@@ -2124,7 +2202,7 @@ def _apply_ring_plane_gated_surface_assignment(
 
         for cell_id in child_cell_ids:
             center = np.asarray(centers[int(cell_id)], dtype=float)
-            signed_distance = child_side_sign * float(np.dot(center - ring_center, ring_normal))
+            signed_distance = float(np.dot(center - ring_center, child_side_normal))
             signed_distance_by_cell[int(cell_id)] = signed_distance
 
             if signed_distance < -RING_PLANE_ASSIGNMENT_TOLERANCE_MM:
@@ -2137,6 +2215,32 @@ def _apply_ring_plane_gated_surface_assignment(
         for cell_id in parent_side_cell_ids:
             assigned_segment_ids[int(cell_id)] = parent_id
         stats["cells_reassigned_to_parent_count"] += int(len(parent_side_cell_ids))
+
+        corridor_leak_cell_ids: list[int] = []
+        for cell_id in list(child_side_or_ambiguous_cell_ids):
+            if int(assigned_segment_ids[int(cell_id)]) != child_id:
+                continue
+            center = np.asarray(centers[int(cell_id)], dtype=float)
+            projected_s, corridor_distance = _project_point_to_polyline_s(segment.points, center)
+            if (
+                clip_context.corridor_s_min_mm <= projected_s <= clip_context.corridor_s_max_mm
+                and corridor_distance > clip_context.corridor_radius_limit_mm
+            ):
+                corridor_leak_cell_ids.append(int(cell_id))
+
+        for cell_id in corridor_leak_cell_ids:
+            assigned_segment_ids[int(cell_id)] = parent_id
+            child_side_or_ambiguous_cell_ids.discard(int(cell_id))
+        if corridor_leak_cell_ids:
+            stats["neighbor_contour_leak_count"] = int(len(corridor_leak_cell_ids))
+            stats["cells_reassigned_to_parent_count"] += int(len(corridor_leak_cell_ids))
+            stats["ring_surface_consistency_status"] = STATUS_REQUIRES_REVIEW
+            ring.status = STATUS_REQUIRES_REVIEW
+            ring.confidence = min(float(ring.confidence), 0.68)
+            _append_unique(
+                ring.warnings,
+                "child-colored near-ring cells outside the local branch corridor were reassigned to the parent segment",
+            )
 
         current_child_cell_ids = {
             int(cell_id)
@@ -2171,7 +2275,7 @@ def _apply_ring_plane_gated_surface_assignment(
             signed_distance = signed_distance_by_cell.get(int(cell_id))
             if signed_distance is None:
                 center = np.asarray(centers[int(cell_id)], dtype=float)
-                signed_distance = child_side_sign * float(np.dot(center - ring_center, ring_normal))
+                signed_distance = float(np.dot(center - ring_center, child_side_normal))
             if signed_distance < -RING_PLANE_ASSIGNMENT_TOLERANCE_MM:
                 remaining_parent_side_violation_count += 1
 
@@ -2185,6 +2289,17 @@ def _apply_ring_plane_gated_surface_assignment(
                 "child-colored surface cells remain on the parent side of the branch_start ring plane",
             )
 
+        child_segment_cell_count = sum(1 for value in assigned_segment_ids if int(value) == child_id)
+        ambiguous_fraction = float(stats["cells_ambiguous_near_ring_count"]) / float(max(1, child_segment_cell_count))
+        if ambiguous_fraction > HIGH_AMBIGUITY_FRACTION:
+            stats["ring_surface_consistency_status"] = STATUS_REQUIRES_REVIEW
+            ring.status = STATUS_REQUIRES_REVIEW
+            ring.confidence = min(float(ring.confidence), 0.68)
+            _append_unique(
+                ring.warnings,
+                "near-ring ambiguity exceeds 5 percent of the child segment surface cell count",
+            )
+
         ring.metadata.update(stats)
         ring.metadata["surface_assignment_adjusted"] = bool(stats["cells_reassigned_to_parent_count"] > 0)
         summary = ring.metadata.get("candidate_summary")
@@ -2193,6 +2308,252 @@ def _apply_ring_plane_gated_surface_assignment(
             summary["cells_reassigned_to_parent_count"] = int(stats["cells_reassigned_to_parent_count"])
 
     return warnings
+
+
+def _clean_polygon_points(points: list[np.ndarray]) -> list[np.ndarray]:
+    cleaned: list[np.ndarray] = []
+    for point in points:
+        p = np.asarray(point, dtype=float).reshape(3)
+        if cleaned and float(np.linalg.norm(cleaned[-1] - p)) <= 1.0e-8:
+            continue
+        cleaned.append(p)
+    if len(cleaned) > 1 and float(np.linalg.norm(cleaned[0] - cleaned[-1])) <= 1.0e-8:
+        cleaned.pop()
+    return cleaned
+
+
+def _clip_polygon_against_signed_plane(
+    points: np.ndarray,
+    signed_distances: np.ndarray,
+    *,
+    keep_child_side: bool,
+) -> list[np.ndarray]:
+    pts = np.asarray(points, dtype=float)
+    signed = np.asarray(signed_distances, dtype=float).reshape(-1)
+    if pts.shape[0] < 3 or signed.shape[0] != pts.shape[0]:
+        return []
+
+    def inside(distance: float) -> bool:
+        return bool(distance >= -EPS) if keep_child_side else bool(distance <= EPS)
+
+    clipped: list[np.ndarray] = []
+    for idx in range(pts.shape[0]):
+        p0 = pts[idx]
+        p1 = pts[(idx + 1) % pts.shape[0]]
+        d0 = float(signed[idx])
+        d1 = float(signed[(idx + 1) % pts.shape[0]])
+        in0 = inside(d0)
+        in1 = inside(d1)
+
+        if in0 and in1:
+            clipped.append(p1.copy())
+        elif in0 and not in1:
+            denom = d0 - d1
+            if abs(denom) > EPS:
+                t = float(np.clip(d0 / denom, 0.0, 1.0))
+                clipped.append((p0 + t * (p1 - p0)).copy())
+        elif not in0 and in1:
+            denom = d0 - d1
+            if abs(denom) > EPS:
+                t = float(np.clip(d0 / denom, 0.0, 1.0))
+                clipped.append((p0 + t * (p1 - p0)).copy())
+            clipped.append(p1.copy())
+
+    return _clean_polygon_points(clipped)
+
+
+def _insert_polygon_cell(
+    points: vtk.vtkPoints,
+    polys: vtk.vtkCellArray,
+    coords: list[np.ndarray],
+    segment_id: int,
+    output_segment_ids: list[int],
+) -> bool:
+    clean = _clean_polygon_points(coords)
+    if len(clean) < 3:
+        return False
+
+    polygon = vtk.vtkPolygon()
+    polygon.GetPointIds().SetNumberOfIds(len(clean))
+    for idx, point in enumerate(clean):
+        p = np.asarray(point, dtype=float).reshape(3)
+        point_id = points.InsertNextPoint(float(p[0]), float(p[1]), float(p[2]))
+        polygon.GetPointIds().SetId(idx, point_id)
+
+    polys.InsertNextCell(polygon)
+    output_segment_ids.append(int(segment_id))
+    return True
+
+
+def _insert_existing_polygon_cell(
+    polys: vtk.vtkCellArray,
+    point_ids: list[int],
+    segment_id: int,
+    output_segment_ids: list[int],
+) -> bool:
+    if len(point_ids) < 3:
+        return False
+    polygon = vtk.vtkPolygon()
+    polygon.GetPointIds().SetNumberOfIds(len(point_ids))
+    for idx, point_id in enumerate(point_ids):
+        polygon.GetPointIds().SetId(idx, int(point_id))
+    polys.InsertNextCell(polygon)
+    output_segment_ids.append(int(segment_id))
+    return True
+
+
+def _select_clip_context_for_cell(
+    point_coords: np.ndarray,
+    assigned_segment_id: int,
+    contexts: list[BranchRingClipContext],
+) -> tuple[Optional[BranchRingClipContext], Optional[np.ndarray]]:
+    if point_coords.shape[0] < 3:
+        return None, None
+
+    center = np.mean(point_coords, axis=0)
+    best_context: Optional[BranchRingClipContext] = None
+    best_signed: Optional[np.ndarray] = None
+    best_key: Optional[tuple[float, float]] = None
+
+    for context in contexts:
+        if int(assigned_segment_id) not in {int(context.child_segment_id), int(context.parent_segment_id)}:
+            continue
+        if not _center_in_branch_corridor(context, center, relaxed=True):
+            continue
+
+        signed = (point_coords - context.center) @ context.child_side_normal
+        signed_min = float(np.min(signed))
+        signed_max = float(np.max(signed))
+        if not (signed_min < -EPS and signed_max > EPS):
+            continue
+        if signed_min >= -RING_PLANE_ASSIGNMENT_TOLERANCE_MM and signed_max <= RING_PLANE_ASSIGNMENT_TOLERANCE_MM:
+            continue
+
+        center_distance = abs(float(np.dot(center - context.center, context.child_side_normal)))
+        key = (center_distance, -(signed_max - signed_min))
+        if best_key is None or key < best_key:
+            best_context = context
+            best_signed = signed
+            best_key = key
+
+    return best_context, best_signed
+
+
+def _build_clipped_segmented_surface(
+    surface: vtk.vtkPolyData,
+    segments: list[GeometrySegment],
+    rings: list[BoundaryRing],
+    assigned_segment_ids: list[int],
+) -> tuple[vtk.vtkPolyData, list[int]]:
+    segment_lookup = _segment_by_id(segments)
+    contexts_by_segment_id: dict[int, list[BranchRingClipContext]] = defaultdict(list)
+    for ring in rings:
+        if ring.ring_type != "branch_start":
+            continue
+        child_id = int(ring.child_segment_id or ring.source_segment_id)
+        segment = segment_lookup.get(child_id)
+        if segment is None or segment.segment_type != "branch":
+            continue
+        parent_id = int(segment.parent_segment_id or ring.parent_segment_id or 1)
+        if parent_id not in segment_lookup:
+            parent_id = 1
+        context = _branch_ring_clip_context(ring, segment, parent_id)
+        contexts_by_segment_id[int(context.child_segment_id)].append(context)
+        contexts_by_segment_id[int(context.parent_segment_id)].append(context)
+
+    vtk_points = vtk.vtkPoints()
+    if surface.GetPoints() is not None:
+        vtk_points.DeepCopy(surface.GetPoints())
+    polys = vtk.vtkCellArray()
+    output_segment_ids: list[int] = []
+
+    for cell_id in range(int(surface.GetNumberOfCells())):
+        point_ids = _point_ids_for_cell(surface.GetCell(cell_id))
+        assigned_segment_id = int(assigned_segment_ids[int(cell_id)])
+        if len(point_ids) < 3:
+            continue
+
+        point_coords = np.asarray([surface.GetPoint(point_id) for point_id in point_ids], dtype=float)
+        context, signed = _select_clip_context_for_cell(
+            point_coords,
+            assigned_segment_id,
+            contexts_by_segment_id.get(int(assigned_segment_id), []),
+        )
+        if context is None or signed is None:
+            _insert_existing_polygon_cell(polys, point_ids, assigned_segment_id, output_segment_ids)
+            continue
+
+        ring = context.ring
+        ring.metadata["clip_boundary_required"] = True
+        child_piece = _clip_polygon_against_signed_plane(point_coords, signed, keep_child_side=True)
+        parent_piece = _clip_polygon_against_signed_plane(point_coords, signed, keep_child_side=False)
+        if len(child_piece) >= 3 and len(parent_piece) >= 3:
+            _insert_polygon_cell(
+                vtk_points,
+                polys,
+                child_piece,
+                context.child_segment_id,
+                output_segment_ids,
+            )
+            _insert_polygon_cell(
+                vtk_points,
+                polys,
+                parent_piece,
+                context.parent_segment_id,
+                output_segment_ids,
+            )
+            ring.metadata["clip_boundary_used"] = True
+            ring.metadata["clip_boundary_unresolved"] = bool(ring.metadata.get("clip_boundary_unresolved", False))
+            ring.metadata["surface_assignment_mode"] = "clipped_ring_boundary"
+            if assigned_segment_id != int(context.child_segment_id):
+                ring.metadata["cells_reassigned_to_child_count"] = int(
+                    ring.metadata.get("cells_reassigned_to_child_count", 0)
+                ) + 1
+            if assigned_segment_id != int(context.parent_segment_id):
+                ring.metadata["cells_reassigned_to_parent_count"] = int(
+                    ring.metadata.get("cells_reassigned_to_parent_count", 0)
+                ) + 1
+        else:
+            ring.metadata["clip_boundary_unresolved"] = True
+            ring.status = STATUS_REQUIRES_REVIEW
+            ring.confidence = min(float(ring.confidence), 0.68)
+            _append_unique(ring.warnings, "ring-plane clipping was required but a crossing cell could not be split")
+            _insert_existing_polygon_cell(polys, point_ids, assigned_segment_id, output_segment_ids)
+
+    out = vtk.vtkPolyData()
+    out.SetPoints(vtk_points)
+    out.SetPolys(polys)
+    labels_by_id = {segment.segment_id: segment.segment_label for segment in segments}
+    labels = [labels_by_id.get(int(segment_id), "aortic_body") for segment_id in output_segment_ids]
+    colors = [segment_color(int(segment_id)) for segment_id in output_segment_ids]
+    add_int_cell_array(out, "SegmentId", output_segment_ids)
+    add_string_cell_array(out, "SegmentLabel", labels)
+    add_uchar3_cell_array(out, "SegmentColor", colors)
+
+    for ring in rings:
+        if ring.ring_type != "branch_start":
+            continue
+        required = bool(ring.metadata.get("clip_boundary_required", False))
+        used = bool(ring.metadata.get("clip_boundary_used", False))
+        if required and not used:
+            ring.metadata["clip_boundary_unresolved"] = True
+            ring.status = STATUS_REQUIRES_REVIEW
+            ring.confidence = min(float(ring.confidence), 0.68)
+            _append_unique(ring.warnings, "ring-plane clipping was required but not completed")
+        if bool(ring.metadata.get("clip_boundary_unresolved", False)):
+            ring.metadata["ring_surface_consistency_status"] = STATUS_REQUIRES_REVIEW
+        ring.metadata["surface_assignment_adjusted"] = bool(
+            int(ring.metadata.get("cells_reassigned_to_parent_count", 0)) > 0
+            or int(ring.metadata.get("cells_reassigned_to_child_count", 0)) > 0
+        )
+        summary = ring.metadata.get("candidate_summary")
+        if isinstance(summary, dict):
+            summary["surface_assignment_adjusted"] = bool(ring.metadata.get("surface_assignment_adjusted", False))
+            summary["cells_reassigned_to_parent_count"] = int(
+                ring.metadata.get("cells_reassigned_to_parent_count", 0)
+            )
+
+    return out, output_segment_ids
 
 
 def _assign_surface_segments(
@@ -2261,17 +2622,20 @@ def _assign_surface_segments(
         warnings.append("some surface cells could not be assigned and were folded into aortic_body")
         assigned_segment_ids = [int(value) if int(value) > 0 else 1 for value in assigned_segment_ids]
 
-    labels_by_id = {segment.segment_id: segment.segment_label for segment in segments}
-    labels = [labels_by_id.get(int(segment_id), "aortic_body") for segment_id in assigned_segment_ids]
-    colors = [segment_color(int(segment_id)) for segment_id in assigned_segment_ids]
-
-    out = clone_geometry_only(surface)
-    add_int_cell_array(out, "SegmentId", assigned_segment_ids)
-    add_string_cell_array(out, "SegmentLabel", labels)
-    add_uchar3_cell_array(out, "SegmentColor", colors)
+    if rings:
+        out, output_segment_ids = _build_clipped_segmented_surface(surface, segments, rings, assigned_segment_ids)
+    else:
+        labels_by_id = {segment.segment_id: segment.segment_label for segment in segments}
+        labels = [labels_by_id.get(int(segment_id), "aortic_body") for segment_id in assigned_segment_ids]
+        colors = [segment_color(int(segment_id)) for segment_id in assigned_segment_ids]
+        out = clone_geometry_only(surface)
+        add_int_cell_array(out, "SegmentId", assigned_segment_ids)
+        add_string_cell_array(out, "SegmentLabel", labels)
+        add_uchar3_cell_array(out, "SegmentColor", colors)
+        output_segment_ids = list(assigned_segment_ids)
 
     counts: dict[int, int] = defaultdict(int)
-    for segment_id in assigned_segment_ids:
+    for segment_id in output_segment_ids:
         counts[int(segment_id)] += 1
     for segment in segments:
         segment.cell_count = int(counts.get(int(segment.segment_id), 0))
@@ -2437,16 +2801,40 @@ def _visible_ring_diagnostics(result_data: dict[str, Any]) -> dict[str, Any]:
     metrics = result_data.get("metrics", {})
     if not isinstance(metrics, dict):
         metrics = {}
+    rings_json = result_data.get("boundary_rings", [])
+    if not isinstance(rings_json, list):
+        rings_json = []
+    bifurcations_json = result_data.get("bifurcations", [])
+    if not isinstance(bifurcations_json, list):
+        bifurcations_json = []
+    branch_start_ring_ids = {
+        int(_safe_float(ring.get("ring_id"), 0.0))
+        for ring in rings_json
+        if isinstance(ring, dict) and ring.get("ring_type") == "branch_start"
+    }
+    duplicate_daughter_start_rings_suppressed = 0
+    for bifurcation in bifurcations_json:
+        if not isinstance(bifurcation, dict):
+            continue
+        daughter_ids = bifurcation.get("daughter_start_ring_ids", [])
+        if not isinstance(daughter_ids, list):
+            continue
+        duplicate_daughter_start_rings_suppressed += sum(
+            1 for ring_id in daughter_ids if int(_safe_float(ring_id, 0.0)) in branch_start_ring_ids
+        )
     return {
         "visible_ring_count": int(_safe_float(metrics.get("visible_ring_count"), 0.0)),
         "branch_start_ring_count": int(_safe_float(metrics.get("branch_start_ring_count"), 0.0)),
+        "non_branch_start_visible_ring_count": int(
+            _safe_float(metrics.get("non_branch_start_visible_ring_count"), 0.0)
+        ),
         "hidden_or_suppressed_duplicate_ring_count": int(
             _safe_float(metrics.get("hidden_or_suppressed_duplicate_ring_count"), 0.0)
         ),
-        "branch_end_rings_suppressed": int(_safe_float(metrics.get("branch_end_rings_suppressed_count"), 0.0)),
-        "duplicate_daughter_start_rings_suppressed": int(
-            _safe_float(metrics.get("duplicate_daughter_start_rings_suppressed_count"), 0.0)
+        "branch_end_rings_suppressed": int(
+            sum(1 for ring in rings_json if isinstance(ring, dict) and ring.get("ring_type") == "branch_end")
         ),
+        "duplicate_daughter_start_rings_suppressed": int(duplicate_daughter_start_rings_suppressed),
     }
 
 
@@ -2462,6 +2850,11 @@ def _surface_assignment_consistency_diagnostics(result_data: dict[str, Any]) -> 
         for segment in segments_json
         if isinstance(segment, dict)
     }
+    segment_cell_counts_by_id = {
+        int(_safe_float(segment.get("segment_id"), 0.0)): int(_safe_float(segment.get("cell_count"), 0.0))
+        for segment in segments_json
+        if isinstance(segment, dict)
+    }
     branch_start_rings = [
         ring for ring in rings_json if isinstance(ring, dict) and ring.get("ring_type") == "branch_start"
     ]
@@ -2472,6 +2865,10 @@ def _surface_assignment_consistency_diagnostics(result_data: dict[str, Any]) -> 
     ambiguous_near_ring_total = 0
     ring_plane_parent_side_violation_total = 0
     connected_component_cleanup_reassigned_total = 0
+    high_ambiguity_ring_count = 0
+    clip_boundary_required_count = 0
+    clip_boundary_unresolved_count = 0
+    segments_with_neighbor_contour_leak_count = 0
     rings_requiring_review: list[int] = []
     projection_only_count = 0
 
@@ -2483,6 +2880,10 @@ def _surface_assignment_consistency_diagnostics(result_data: dict[str, Any]) -> 
         cells_ambiguous_near_ring_count = int(_safe_float(ring.get("cells_ambiguous_near_ring_count"), 0.0))
         parent_side_violation_count = int(_safe_float(ring.get("ring_plane_parent_side_violation_count"), 0.0))
         cleanup_reassigned_count = int(_safe_float(ring.get("connected_component_cleanup_reassigned_count"), 0.0))
+        neighbor_contour_leak_count = int(_safe_float(ring.get("neighbor_contour_leak_count"), 0.0))
+        clip_boundary_used = bool(ring.get("clip_boundary_used", False))
+        clip_boundary_required = bool(ring.get("clip_boundary_required", False))
+        clip_boundary_unresolved = bool(ring.get("clip_boundary_unresolved", False))
         surface_assignment_mode = str(ring.get("surface_assignment_mode", "projection_only_requires_review"))
         consistency_status = str(ring.get("ring_surface_consistency_status", STATUS_REQUIRES_REVIEW))
 
@@ -2491,6 +2892,15 @@ def _surface_assignment_consistency_diagnostics(result_data: dict[str, Any]) -> 
         ambiguous_near_ring_total += cells_ambiguous_near_ring_count
         ring_plane_parent_side_violation_total += parent_side_violation_count
         connected_component_cleanup_reassigned_total += cleanup_reassigned_count
+        child_cell_count = max(1, int(segment_cell_counts_by_id.get(segment_id, 1)))
+        if float(cells_ambiguous_near_ring_count) / float(child_cell_count) > HIGH_AMBIGUITY_FRACTION:
+            high_ambiguity_ring_count += 1
+        if clip_boundary_required:
+            clip_boundary_required_count += 1
+        if clip_boundary_unresolved:
+            clip_boundary_unresolved_count += 1
+        if neighbor_contour_leak_count > 0:
+            segments_with_neighbor_contour_leak_count += 1
         if consistency_status != STATUS_SUCCESS or surface_assignment_mode == "projection_only_requires_review":
             rings_requiring_review.append(ring_id)
         if surface_assignment_mode == "projection_only_requires_review":
@@ -2506,6 +2916,10 @@ def _surface_assignment_consistency_diagnostics(result_data: dict[str, Any]) -> 
                 "surface_assignment_mode": surface_assignment_mode,
                 "ring_plane_assignment_tolerance_mm": ring.get("ring_plane_assignment_tolerance_mm"),
                 "selected_offset_mm": ring.get("selected_offset_mm"),
+                "zero_offset_proof_passed": bool(ring.get("zero_offset_proof_passed", False)),
+                "clip_boundary_used": bool(clip_boundary_used),
+                "clip_boundary_required": bool(clip_boundary_required),
+                "clip_boundary_unresolved": bool(clip_boundary_unresolved),
                 "status": ring.get("status"),
                 "classification": ring.get("selected_candidate_classification"),
                 "confidence": ring.get("confidence"),
@@ -2515,6 +2929,7 @@ def _surface_assignment_consistency_diagnostics(result_data: dict[str, Any]) -> 
                 "cells_reassigned_to_child_count": int(cells_reassigned_to_child_count),
                 "cells_ambiguous_near_ring_count": int(cells_ambiguous_near_ring_count),
                 "ring_plane_parent_side_violation_count": int(parent_side_violation_count),
+                "neighbor_contour_leak_count": int(neighbor_contour_leak_count),
                 "connected_component_cleanup_reassigned_count": int(cleanup_reassigned_count),
                 "ring_surface_consistency_status": consistency_status,
             }
@@ -2522,6 +2937,8 @@ def _surface_assignment_consistency_diagnostics(result_data: dict[str, Any]) -> 
 
     if projection_only_count:
         surface_assignment_mode = "projection_only_requires_review"
+    elif any(str(ring.get("surface_assignment_mode", "")) == "clipped_ring_boundary" for ring in branch_start_rings):
+        surface_assignment_mode = "clipped_ring_boundary"
     elif any(
         str(ring.get("surface_assignment_mode", "")) == "ring_plane_gated_with_connectivity_cleanup"
         for ring in branch_start_rings
@@ -2535,6 +2952,12 @@ def _surface_assignment_consistency_diagnostics(result_data: dict[str, Any]) -> 
         "ring_plane_assignment_tolerance_mm": float(RING_PLANE_ASSIGNMENT_TOLERANCE_MM),
         "ring_plane_parent_side_violation_total": int(ring_plane_parent_side_violation_total),
         "ambiguous_near_ring_total": int(ambiguous_near_ring_total),
+        "high_ambiguity_ring_count": int(high_ambiguity_ring_count),
+        "clip_boundary_used": bool(
+            any(bool(ring.get("clip_boundary_used", False)) for ring in branch_start_rings)
+        ),
+        "clip_boundary_required_count": int(clip_boundary_required_count),
+        "clip_boundary_unresolved_count": int(clip_boundary_unresolved_count),
         "segments_with_color_crossing_ring_count": int(
             sum(
                 1
@@ -2542,6 +2965,7 @@ def _surface_assignment_consistency_diagnostics(result_data: dict[str, Any]) -> 
                 if int(_safe_float(ring.get("ring_plane_parent_side_violation_count"), 0.0)) > 0
             )
         ),
+        "segments_with_neighbor_contour_leak_count": int(segments_with_neighbor_contour_leak_count),
         "cells_reassigned_to_parent_total": int(cells_reassigned_to_parent_total),
         "cells_reassigned_to_child_total": int(cells_reassigned_to_child_total),
         "connected_component_cleanup_reassigned_total": int(connected_component_cleanup_reassigned_total),
@@ -2585,7 +3009,9 @@ def _branch_start_refinement_diagnostics(result_data: dict[str, Any]) -> dict[st
             candidate_summary = {}
         selected_offset = _safe_float(ring.get("selected_offset_mm", ring.get("source_centerline_s_mm")), 0.0)
         zero_offset_selected = bool(selected_offset <= ZERO_OFFSET_TOLERANCE_MM)
-        zero_offset_proof_passed = bool(candidate_summary.get("zero_offset_proof_passed", False))
+        zero_offset_proof_passed = bool(
+            ring.get("zero_offset_proof_passed", False) or candidate_summary.get("zero_offset_proof_passed", False)
+        )
         fallback_used = bool(candidate_summary.get("fallback_used", False))
         stable_found = candidate_summary.get("reference_offset_mm") is not None or candidate_summary.get("first_stable_offset_mm") is not None
         parent_contamination_found = int(_safe_float(candidate_summary.get("rejected_too_proximal_count"), 0.0)) > 0
@@ -2959,18 +3385,13 @@ def run_geometry_segmentation(
 
     requires_review_ring_count = sum(1 for ring in rings if ring.status == STATUS_REQUIRES_REVIEW)
     failed_ring_count = sum(1 for ring in rings if ring.status == STATUS_FAILED)
-    low_confidence_ring_count = sum(1 for ring in rings if ring.confidence < 0.7)
-    visible_ring_count = len(_visible_boundary_rings(rings))
+    visible_rings = _visible_boundary_rings(rings)
+    visible_ring_count = len(visible_rings)
+    non_branch_start_visible_ring_count = sum(1 for ring in visible_rings if ring.ring_type != "branch_start")
     branch_start_rings = [ring for ring in rings if ring.ring_type == "branch_start"]
-    branch_start_ring_count = len(branch_start_rings)
-    branch_start_ring_ids = {int(ring.ring_id) for ring in branch_start_rings}
-    branch_end_rings_suppressed_count = sum(1 for ring in rings if ring.ring_type == "branch_end")
-    duplicate_daughter_start_rings_suppressed_count = sum(
-        1
-        for bifurcation in bifurcations
-        for ring_id in bifurcation.daughter_start_ring_ids
-        if int(ring_id) in branch_start_ring_ids
-    )
+    visible_branch_start_rings = [ring for ring in visible_rings if ring.ring_type == "branch_start"]
+    branch_start_ring_count = len(visible_branch_start_rings)
+    hidden_or_suppressed_duplicate_ring_count = max(0, len(rings) - visible_ring_count)
     ring_plane_parent_side_violation_total = sum(
         int(ring.metadata.get("ring_plane_parent_side_violation_count", 0))
         for ring in branch_start_rings
@@ -2979,16 +3400,41 @@ def run_geometry_segmentation(
         int(ring.metadata.get("cells_ambiguous_near_ring_count", 0))
         for ring in branch_start_rings
     )
-    connected_component_cleanup_reassigned_total = sum(
-        int(ring.metadata.get("connected_component_cleanup_reassigned_count", 0))
-        for ring in branch_start_rings
+    segment_lookup_for_metrics = _segment_by_id(segments)
+    high_ambiguity_ring_count = 0
+    for ring in branch_start_rings:
+        child_id = int(ring.child_segment_id or ring.source_segment_id)
+        child_segment = segment_lookup_for_metrics.get(child_id)
+        child_cell_count = max(1, int(child_segment.cell_count) if child_segment is not None else 1)
+        ambiguous_count = int(ring.metadata.get("cells_ambiguous_near_ring_count", 0))
+        if float(ambiguous_count) / float(child_cell_count) > HIGH_AMBIGUITY_FRACTION:
+            high_ambiguity_ring_count += 1
+    clip_boundary_used = any(bool(ring.metadata.get("clip_boundary_used", False)) for ring in branch_start_rings)
+    clip_boundary_required_count = sum(
+        1 for ring in branch_start_rings if bool(ring.metadata.get("clip_boundary_required", False))
+    )
+    clip_boundary_unresolved_count = sum(
+        1 for ring in branch_start_rings if bool(ring.metadata.get("clip_boundary_unresolved", False))
     )
     segments_with_color_crossing_ring_count = sum(
         1
         for ring in branch_start_rings
         if int(ring.metadata.get("ring_plane_parent_side_violation_count", 0)) > 0
     )
+    segments_with_neighbor_contour_leak_count = sum(
+        1
+        for ring in branch_start_rings
+        if int(ring.metadata.get("neighbor_contour_leak_count", 0)) > 0
+    )
     status = _result_status(segments, rings, warnings)
+    if (
+        non_branch_start_visible_ring_count
+        or visible_ring_count != branch_start_ring_count
+        or high_ambiguity_ring_count
+        or clip_boundary_unresolved_count
+        or segments_with_neighbor_contour_leak_count
+    ):
+        status = _worse_status(status, STATUS_REQUIRES_REVIEW)
 
     result = {
         "status": status,
@@ -3018,21 +3464,21 @@ def run_geometry_segmentation(
             "ring_count": int(len(rings)),
             "visible_ring_count": int(visible_ring_count),
             "branch_start_ring_count": int(branch_start_ring_count),
-            "branch_end_rings_suppressed_count": int(branch_end_rings_suppressed_count),
-            "duplicate_daughter_start_rings_suppressed_count": int(duplicate_daughter_start_rings_suppressed_count),
-            "hidden_or_suppressed_duplicate_ring_count": int(
-                branch_end_rings_suppressed_count + duplicate_daughter_start_rings_suppressed_count
-            ),
+            "non_branch_start_visible_ring_count": int(non_branch_start_visible_ring_count),
+            "hidden_or_suppressed_duplicate_ring_count": int(hidden_or_suppressed_duplicate_ring_count),
             "ring_plane_assignment_tolerance_mm": float(RING_PLANE_ASSIGNMENT_TOLERANCE_MM),
             "ring_plane_parent_side_violation_total": int(ring_plane_parent_side_violation_total),
             "ambiguous_near_ring_total": int(ambiguous_near_ring_total),
-            "connected_component_cleanup_reassigned_total": int(connected_component_cleanup_reassigned_total),
+            "high_ambiguity_ring_count": int(high_ambiguity_ring_count),
+            "clip_boundary_used": bool(clip_boundary_used),
+            "clip_boundary_required_count": int(clip_boundary_required_count),
+            "clip_boundary_unresolved_count": int(clip_boundary_unresolved_count),
             "segments_with_color_crossing_ring_count": int(segments_with_color_crossing_ring_count),
-            "surface_cell_count": int(surface.GetNumberOfCells()),
+            "segments_with_neighbor_contour_leak_count": int(segments_with_neighbor_contour_leak_count),
+            "surface_cell_count": int(segmented_surface.GetNumberOfCells()),
             "unassigned_cell_count": int(unassigned_cell_count),
             "requires_review_ring_count": int(requires_review_ring_count),
             "failed_ring_count": int(failed_ring_count),
-            "low_confidence_ring_count": int(low_confidence_ring_count),
         },
     }
 
@@ -3066,11 +3512,23 @@ def _failed_result(
             "branch_count": 0,
             "bifurcation_count": 0,
             "ring_count": 0,
+            "visible_ring_count": 0,
+            "branch_start_ring_count": 0,
+            "non_branch_start_visible_ring_count": 0,
+            "hidden_or_suppressed_duplicate_ring_count": 0,
+            "ring_plane_assignment_tolerance_mm": float(RING_PLANE_ASSIGNMENT_TOLERANCE_MM),
+            "ring_plane_parent_side_violation_total": 0,
+            "ambiguous_near_ring_total": 0,
+            "high_ambiguity_ring_count": 0,
+            "clip_boundary_used": False,
+            "clip_boundary_required_count": 0,
+            "clip_boundary_unresolved_count": 0,
+            "segments_with_color_crossing_ring_count": 0,
+            "segments_with_neighbor_contour_leak_count": 0,
             "surface_cell_count": 0,
             "unassigned_cell_count": 0,
             "requires_review_ring_count": 0,
             "failed_ring_count": 0,
-            "low_confidence_ring_count": 0,
         },
     }
 
