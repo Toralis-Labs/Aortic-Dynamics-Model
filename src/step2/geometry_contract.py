@@ -992,10 +992,45 @@ def _run_vmtk_branch_group_segmentation(
     )
 
 
+def _compute_aorta_local_radii(
+    aorta_segment: "GeometrySegment",
+    raw_centerlines: vtk.vtkPolyData,
+    cell_arclengths: np.ndarray,
+) -> np.ndarray:
+    """Per-cell local aorta radius by interpolating MISR from the raw VMTK centerlines."""
+    misr_arr = raw_centerlines.GetPointData().GetArray("MaximumInscribedSphereRadius")
+    if misr_arr is None or raw_centerlines.GetNumberOfPoints() == 0:
+        return np.full(cell_arclengths.shape, 1.5, dtype=float)
+
+    n_raw = raw_centerlines.GetNumberOfPoints()
+    raw_pts = np.asarray([raw_centerlines.GetPoint(i) for i in range(n_raw)], dtype=float)
+    raw_misr = np.asarray([misr_arr.GetTuple1(i) for i in range(n_raw)], dtype=float)
+
+    aorta_pts = np.asarray(aorta_segment.points, dtype=float)
+
+    diff_raw_to_aorta = raw_pts[:, np.newaxis, :] - aorta_pts[np.newaxis, :, :]
+    min_dist_per_raw = np.sqrt((diff_raw_to_aorta * diff_raw_to_aorta).sum(axis=2).min(axis=1))
+    aorta_path_mask = min_dist_per_raw < 0.60
+    if aorta_path_mask.sum() < 10:
+        aorta_path_mask = np.ones(n_raw, dtype=bool)
+    filtered_raw_pts = raw_pts[aorta_path_mask]
+    filtered_raw_misr = raw_misr[aorta_path_mask]
+
+    diff = aorta_pts[:, np.newaxis, :] - filtered_raw_pts[np.newaxis, :, :]
+    dist_sq = (diff * diff).sum(axis=2)
+    nearest_idx = dist_sq.argmin(axis=1)
+    aorta_misr = filtered_raw_misr[nearest_idx]
+
+    aorta_s = cumulative_arclength(aorta_pts)
+    local_radius = np.interp(cell_arclengths, aorta_s, aorta_misr)
+    return np.maximum(local_radius, 0.45)
+
+
 def _assign_surface_cells_from_vmtk(
     surface: vtk.vtkPolyData,
     segments: list[GeometrySegment],
     vmtk_result: VmtkBranchSegmentation,
+    raw_centerlines: Optional[vtk.vtkPolyData] = None,
 ) -> tuple[np.ndarray, Dict[str, int], Dict[int, int], Dict[str, np.ndarray]]:
     n_cells = int(surface.GetNumberOfCells())
     labels = np.zeros((n_cells,), dtype=np.int32)
@@ -1037,7 +1072,16 @@ def _assign_surface_cells_from_vmtk(
             if seg.terminal_face_id is not None:
                 terminal_face_mask |= model_face_int == int(seg.terminal_face_id)
     aorta_id = int(next(s.segment_id for s in segments if s.segment_type == "aorta_trunk"))
+    aorta_segment = next(s for s in segments if s.segment_type == "aorta_trunk")
     aorta_radius = max(float(radius_by_segment.get(aorta_id, 1.0)), 0.45)
+
+    if raw_centerlines is not None:
+        local_aorta_radii = _compute_aorta_local_radii(
+            aorta_segment, raw_centerlines, arclength_by_segment[aorta_id]
+        )
+    else:
+        local_aorta_radii = np.full(n_cells, aorta_radius, dtype=float)
+
     branch_parent_wall_before_rescue = 0
     for segment in segments:
         if segment.segment_type == "aorta_trunk":
@@ -1048,10 +1092,9 @@ def _assign_surface_cells_from_vmtk(
         if branch_cells.size == 0:
             continue
         child_score = distance_by_segment[seg_id][branch_cells] / radius
-        parent_score = distance_by_segment[aorta_id][branch_cells] / aorta_radius
-        # Primary: fails the origin-allowed mask, but only if the cell is NOT in
-        # the branch core (child_score guard stops over-rescuing cells at the
-        # branch base whose signed value is slightly behind the proximal boundary).
+        local_radius_bc = local_aorta_radii[branch_cells]
+        parent_score = distance_by_segment[aorta_id][branch_cells] / local_radius_bc
+        # Primary: fails the origin-allowed mask (proximal-plane + competition).
         allowed = _branch_origin_allowed_mask(
             centers,
             branch_cells,
@@ -1064,18 +1107,22 @@ def _assign_surface_cells_from_vmtk(
             strict=True,
         )
         mask_rescue = ~allowed & (child_score > 0.80)
-        # Secondary: cell is on the aorta surface AND closer to the aorta centerline
-        # than to the branch (normalized). Catches aorta-wall cells outside the
-        # near_origin zone that VMTK's Voronoi over-assigned to a branch.
-        # parent_score < 1.20 keeps us near the aorta surface (within 3.6cm for
-        # the hardcoded aorta radius 3.0). child_score > 0.75 avoids rescuing
-        # legitimate branch lumen cells very close to the branch centerline.
-        aorta_wall_rescue = (parent_score < 1.20) & (child_score > 0.75)
+        aorta_wall_rescue = parent_score < 1.20
         leak_cells = branch_cells[mask_rescue | aorta_wall_rescue]
         branch_parent_wall_before_rescue += int(leak_cells.size)
         if leak_cells.size:
             labels[leak_cells] = 1
             assignment_mode[leak_cells] = 11
+
+    # Sweep up isolated spots: small disconnected patches of any label surrounded
+    # by a different label get absorbed by their dominant neighbor.
+    terminal_face_set: set[int] = set()
+    for seg in segments:
+        if seg.terminal_face_id is not None:
+            terminal_face_set.add(int(seg.terminal_face_id))
+    _cleanup_small_label_islands(
+        surface, labels, terminal_face_set, assignment_mode, max_island_cells=100
+    )
 
     branch_group_aorta_labels = int(np.count_nonzero((original_labels > 1) & (labels == 1)))
     aorta_group_branch_labels = int(np.count_nonzero((original_labels == 1) & (labels > 1)))
@@ -3386,7 +3433,9 @@ def run_step2(args: argparse.Namespace) -> Dict[str, Any]:
         "source_components": ["centerline_landmark", "surface_derived_boundary_profile"],
     }
 
-    labels, assignment_counts, _, diagnostics = _assign_surface_cells_from_vmtk(partitioned_surface, segments, vmtk_result)
+    labels, assignment_counts, _, diagnostics = _assign_surface_cells_from_vmtk(
+        partitioned_surface, segments, vmtk_result, raw_centerlines
+    )
     if int(np.count_nonzero(labels <= 0)) > 0:
         raise Step2Failure("Core segment assignment is too unreliable: some cells remained unassigned.")
     if len([seg for seg in segments if seg.cell_count > 0]) < 2:
