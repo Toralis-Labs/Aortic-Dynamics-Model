@@ -9,32 +9,38 @@ The resources are constraints, not suggestions. Future code prompts must obey th
 The one current target is:
 
 ```text
-ring-to-color consistency
+minimal branch_start-only visible rings with surface colors beginning cleanly at those rings
 ```
 
 The current failure is:
 
 ```text
-branch_start rings are improved, but child branch colors can still cross proximal to the visible branch_start ring
+branch_start rings are improved, but boundary_rings.vtp still shows extra visible circles and child branch colors can cross the visible branch_start boundary
 ```
 
 The next code work must fix only:
 
 ```text
-ring-plane-gated surface assignment
-surface coloring that begins exactly at the selected branch_start ring
-minimal operational visible rings
+branch_start-only visible rings
+ring-to-color consistency
+surface coloring that begins at the selected branch_start ring
+RING_PLANE_ASSIGNMENT_TOLERANCE_MM = 0.10
+clipped ring boundary when recoloring is insufficient
 ```
+
+`boundary_rings.vtp` is an interface file.
+
+By default, `boundary_rings.vtp` must contain only visible operational `branch_start` rings.
 
 The branch color must begin at the `branch_start` ring.
 
 The selected `branch_start` ring is the visible operational boundary, not only a marker.
 
-`boundary_rings.vtp` is a minimal interface output, not a debug dump.
+If whole-cell recoloring cannot make the visible `SegmentColor` boundary match the ring, the implementation must use `vtkClipPolyData` or equivalent polygonal clipping/splitting logic.
 
-Codex must prefer deletion, suppression of duplicate visible rings, simplification, and tighter contracts over new outputs, new arrays, broad helper systems, or broad architecture.
+Codex must prefer deletion, suppression of non-operational visible rings, simplification, and tighter contracts over new outputs, new arrays, broad helper systems, or broad architecture.
 
-Codex must not add new files or VTP arrays to solve uncertainty.
+There must be no extra VTP arrays and no extra output files to explain this problem.
 
 VTP and JSON outputs are intentionally minimal.
 

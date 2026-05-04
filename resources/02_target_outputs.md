@@ -54,16 +54,24 @@ SegmentLabel
 SegmentColor
 ```
 
-No extra cell arrays are allowed unless a future prompt explicitly requests them.
+Extra VTP arrays are forbidden by default.
+
+A future prompt must explicitly change this contract before any extra VTP arrays are added.
 
 Forbidden arrays include:
 
 ```text
+ring plane distance
+tolerance
+clip status
+original cell id
+debug flags
+region id
+parent-side violation
+connectivity region
+candidate metrics
 anatomy-name arrays
 vessel-name arrays
-debug arrays
-candidate arrays
-surface-cut metric arrays
 ```
 
 The only anatomical value allowed in `SegmentLabel` is:
@@ -84,7 +92,11 @@ The selected circular ring must affect surface cell assignment.
 
 The branch color must begin at the `branch_start` ring.
 
-Surface cells associated with a child branch but lying proximal to the selected `branch_start` ring plane beyond tolerance must be reassigned to the parent segment.
+Surface cells associated with a child branch but lying proximal to the selected `branch_start` ring plane beyond tolerance must be reassigned to the parent segment, clipped, or counted against success.
+
+If whole-cell recoloring cannot create a clean color boundary at the ring, clipped output still writes to the same `outputs/segmented_surface.vtp` file.
+
+No extra output files are allowed for clipping or tolerance diagnostics.
 
 If `segmented_surface.vtp` and `boundary_rings.vtp` disagree, the output status must be:
 
@@ -100,11 +112,19 @@ failed
 
 ## outputs/boundary_rings.vtp
 
-`boundary_rings.vtp` is a minimal interface output.
+`boundary_rings.vtp` is an interface file.
 
-It is not a full internal debug dump.
+It is not a full internal ring dump.
 
-This file must contain only circular ring geometry for operational boundaries needed to interpret `outputs/segmented_surface.vtp`.
+By default, this file must contain only circular ring geometry for visible operational `branch_start` boundaries needed to interpret `outputs/segmented_surface.vtp`.
+
+Default visible ring type:
+
+```text
+branch_start
+```
+
+This is the branch_start-only visible rings contract.
 
 Required and allowed cell-data arrays are exactly:
 
@@ -120,7 +140,9 @@ Confidence
 Status
 ```
 
-No extra ring arrays are allowed unless a future prompt explicitly requests them.
+Extra ring arrays are forbidden by default.
+
+A future prompt must explicitly change this contract before any extra ring arrays are added.
 
 Do not put candidate metrics into `boundary_rings.vtp`.
 
@@ -130,43 +152,35 @@ VTP files are for visual inspection and minimum segment/ring selection.
 
 Detailed candidate reasoning belongs only in compact JSON.
 
-Default visible ring types are:
+Hidden/internal-only ring concepts by default are:
 
 ```text
 aortic_body_start
 aortic_body_end
-branch_start
-parent_pre_bifurcation only if distinct and useful
-```
-
-Hidden/internal-only ring concepts by default are:
-
-```text
+parent_pre_bifurcation
 branch_end
-duplicate daughter_start
+daughter_start
 ```
 
-`branch_start` rings are required and visible.
+`parent_pre_bifurcation` is internal/hidden by default and must not appear in `boundary_rings.vtp` unless a future prompt explicitly requests review/internal ring visualization.
 
-`aortic_body_start` and `aortic_body_end` may remain visible.
+`aortic_body_start` and `aortic_body_end` are internal/hidden by default and must not appear in `boundary_rings.vtp` unless a future prompt explicitly requests them.
 
-`parent_pre_bifurcation` rings may remain visible only when they represent distinct useful parent boundaries.
+`branch_end` rings must not be written to `boundary_rings.vtp` by default.
 
-`branch_end` rings are not written by default unless a future prompt explicitly requests them.
+`daughter_start` rings must not be written to `boundary_rings.vtp` by default.
 
-Duplicate `daughter_start` rings are not written by default.
+If `daughter_start` topology is needed, it must reference an existing `branch_start` ring ID in JSON instead of creating visible duplicate geometry.
 
-If a `daughter_start` concept is needed for JSON topology, it should reference the corresponding `branch_start` ring ID instead of creating duplicate visible geometry.
+Every branch segment must have exactly one visible `branch_start` ring unless the `branch_start` is invalid and intentionally suppressed with `requires_review`.
 
-The expected visible ring count is roughly:
+`visible_ring_count` must equal `branch_start_ring_count` by default.
 
-```text
-visible branch_start rings
-+ aortic_body_start/end
-+ distinct parent_pre_bifurcation rings if retained
-```
+If `visible_ring_count` is greater than `branch_start_ring_count`, the output is not minimal and must be `requires_review` or `failed`.
 
-It must not include duplicate `daughter_start` rings or routine `branch_end` rings.
+The visible ring count must be checked against the number of visible branch starts. A mismatch means the visual interface is cluttered and must not be marked success.
+
+A future prompt may explicitly request review rings or hidden/internal ring visualization, but that is not allowed by default.
 
 ## outputs/segmentation_result.json
 
@@ -241,6 +255,7 @@ selected_candidate_classification
 selected_radius_rule
 surface_cut_used
 backward_refinement_used
+zero_offset_proof_passed
 cells_reassigned_to_parent_count
 candidate_summary
 ```
@@ -250,10 +265,14 @@ Allowed compact surface assignment consistency metadata for each `branch_start` 
 ```text
 surface_assignment_mode
 ring_plane_assignment_tolerance_mm
+clip_boundary_used
+clip_boundary_required
+clip_boundary_unresolved
 cells_reassigned_to_parent_count
 cells_reassigned_to_child_count
 cells_ambiguous_near_ring_count
 ring_plane_parent_side_violation_count
+neighbor_contour_leak_count
 ring_surface_consistency_status
 ```
 
@@ -262,6 +281,7 @@ Allowed values for `surface_assignment_mode`:
 ```text
 ring_plane_gated
 ring_plane_gated_with_connectivity_cleanup
+clipped_ring_boundary
 projection_only_requires_review
 ```
 
@@ -327,11 +347,17 @@ bifurcation_count
 ring_count
 visible_ring_count
 branch_start_ring_count
+non_branch_start_visible_ring_count
 hidden_or_suppressed_duplicate_ring_count
 ring_plane_assignment_tolerance_mm
 ring_plane_parent_side_violation_total
 ambiguous_near_ring_total
+high_ambiguity_ring_count
+clip_boundary_used
+clip_boundary_required_count
+clip_boundary_unresolved_count
 segments_with_color_crossing_ring_count
+segments_with_neighbor_contour_leak_count
 surface_cell_count
 unassigned_cell_count
 requires_review_ring_count

@@ -15,11 +15,12 @@ Do not solve naming, clinical interpretation, measurement extraction, simulation
 The next code prompt must focus only on:
 
 ```text
+branch_start-only visible rings
 surface assignment consistency with the selected branch_start ring
-visible ring minimalism
+clipped/color boundary correctness
 ```
 
-The next code change must focus on surface assignment, not ring search.
+The next code change must focus on visible ring count and surface assignment, not broad ring search.
 
 Do not primarily move rings again unless validation proves the selected ring itself is invalid.
 
@@ -47,7 +48,21 @@ outputs/segmentation_result.json
 
 Optional compact diagnostics are governed by `resources/05_validation_and_iteration.md`.
 
-No candidate VTPs, all-candidate dumps, branch cloud files, or raw component files are allowed unless a future prompt explicitly requests them.
+No candidate VTPs, all-candidate dumps, branch cloud files, raw component files, or clipping debug files are allowed unless a future prompt explicitly requests them.
+
+There must be no extra VTP arrays and no extra output files for this fix.
+
+## Default Ring Visibility
+
+By default, `outputs/boundary_rings.vtp` contains only operational `branch_start` rings.
+
+`visible_ring_count` must equal `branch_start_ring_count` by default.
+
+`parent_pre_bifurcation` is internal/hidden by default.
+
+`aortic_body_start`, `aortic_body_end`, `branch_end`, and `daughter_start` are internal/hidden by default.
+
+If `daughter_start` topology is needed, it must reference an existing `branch_start` ring ID in JSON instead of creating visible duplicate geometry.
 
 ## Stable Daughter Section + Backward Refinement
 
@@ -73,10 +88,8 @@ The implementation must:
 7. Stop when parent contamination or unstable mixed parent-child geometry appears.
 8. Select the most proximal candidate that is still clean and stable.
 9. Use that candidate as the circular branch_start cut-boundary.
-10. Reassign surface cells so the surface split is consistent with the selected ring.
+10. Reassign, clip, or split surface cells so the surface boundary is consistent with the selected ring.
 ```
-
-The selected `branch_start` ring must be the earliest stable daughter-boundary after backward refinement, not the first candidate that produces a cut.
 
 Required branch-start algorithm name:
 
@@ -96,11 +109,13 @@ The topology start is only a search origin.
 
 The final ring requires surface-cut evidence and surface assignment consistency.
 
+Unproven zero-offset `branch_start` rings are not clean operational rings.
+
 ## Surface Assignment Correction
 
 The selected circular ring must drive parent-child surface assignment.
 
-Surface cells associated with the child branch but proximal to the selected `branch_start` ring plane beyond tolerance must be reassigned to the parent.
+Surface cells associated with the child branch but proximal to the selected `branch_start` ring plane beyond tolerance must be reassigned to the parent, clipped, or counted against success.
 
 `segmented_surface.vtp` must agree with `boundary_rings.vtp`.
 
@@ -116,6 +131,24 @@ or:
 failed
 ```
 
+The implementation must define and report:
+
+```text
+RING_PLANE_ASSIGNMENT_TOLERANCE_MM = 0.10
+```
+
+Allowed tolerance range:
+
+```text
+0.05 mm to 0.15 mm
+```
+
+Any tolerance above `0.15 mm` must force `requires_review` unless explicitly justified.
+
+Do not create a VTP array for tolerance.
+
+Do not create extra debug files for tolerance.
+
 ## Ring-Plane-Gated Surface Assignment
 
 The next code change must focus on surface assignment, not ring search.
@@ -129,36 +162,90 @@ Algorithm:
 2. Build a signed plane from the ring center and normal.
 3. For each cell assigned to the child segment, calculate signed distance to the ring plane.
 4. Reassign parent-side cells to the parent if they are beyond tolerance.
-5. Keep only the connected distal child-side component.
-6. Reassign isolated proximal/parent-wall patches to the parent.
-7. Mark requires_review if coloring and ring still disagree.
+5. Treat ambiguous near-ring cells conservatively.
+6. Keep only the connected distal child-side component.
+7. Reassign isolated proximal/parent-wall patches to the parent.
+8. Mark requires_review if coloring and ring still disagree.
 ```
 
 Surface assignment must use the selected `branch_start` ring plane as a hard gate, not only centerline projection.
 
-Centerline projection alone is insufficient for steep branches because parent-wall cells may project onto the child centerline after the selected offset.
-
-The implementation may use `vtkClipPolyData`, direct ring-plane side tests, VTK connectivity logic, or its own cell-adjacency connected-component cleanup.
+Centerline projection alone is insufficient for final surface coloring.
 
 The selected method must keep outputs minimal.
 
-The implementation must define and report:
+## Cell Recoloring Is Not Enough If The Visual Boundary Is Wrong
+
+The current mesh may contain cells that cross the selected `branch_start` ring plane.
+
+If the code only recolors whole cells based on cell centers, the visible boundary may not align with the circular ring.
+
+Cell recoloring is not enough if the visual boundary is wrong.
+
+If color-ring mismatch remains after ring-plane gating, Codex must implement clipping/splitting with `vtkClipPolyData` or equivalent logic, or mark the result `requires_review`.
+
+Codex must not solve this by adding debug files or extra arrays.
+
+Codex must solve it by making `segmented_surface.vtp` itself visually correct.
+
+## Clipped Ring Boundary Contract
+
+The clipped ring boundary contract means the `branch_start` ring defines a geometric boundary plane.
+
+When ring-plane-gated recoloring cannot make the visible `SegmentColor` boundary match the `branch_start` ring within tolerance, the implementation must use `vtkClipPolyData` or equivalent polygonal clipping/splitting logic.
+
+Preferred implementation concept:
 
 ```text
-RING_PLANE_ASSIGNMENT_TOLERANCE_MM = 0.20
+1. Use the branch_start ring center and normal to define a vtkPlane.
+2. Clip or split child/parent surface regions with vtkClipPolyData or equivalent logic.
+3. Keep the child-side clipped surface connected to the distal child branch.
+4. Reassign or discard parent-side child-colored fragments.
+5. Preserve only the minimal SegmentId, SegmentLabel, and SegmentColor arrays.
+6. Do not create extra debug VTP files.
 ```
 
-The first implementation may use a fixed or adaptive tolerance in the range:
+`vtkClipPolyData` is allowed and preferred for this visual-boundary problem because it can cut polygonal cells, not merely recolor whole cells.
+
+## Branch Contour Consistency Contract
+
+A child segment is not valid merely because its cells are distal to the `branch_start` ring plane.
+
+The color should follow the child vessel contour, not surrounding vessels.
+
+Cells should remain child-colored only if they are:
 
 ```text
-0.10 mm to 0.30 mm
+on the child/distal side of the branch_start ring plane
+connected to the distal child branch component
+spatially consistent with the child branch corridor
+within the expected local branch radius/diameter envelope plus tolerance
+not parent/aortic wall or neighboring-branch surface
 ```
 
-Do not create new VTP arrays, debug VTPs, or extra output files for this logic.
+If branch color extends onto parent/aortic wall or neighboring branch contours, `ring_surface_consistency_status` must not be `success`.
+
+## Ambiguous Near-Ring Cells
+
+Ambiguous near-ring cells are not harmless.
+
+They represent uncertainty at the interface.
+
+The implementation must report `ambiguous_near_ring_total`.
+
+Ambiguous near-ring cells must be reduced where possible by clipping/splitting or conservative reassignment.
+
+A high `ambiguous_near_ring_total` must force `requires_review`.
+
+If `cells_ambiguous_near_ring_count` is greater than 5% of the child segment cell count, that `branch_start` ring must be `requires_review` unless clipping resolves the ambiguity.
+
+Do not add per-cell diagnostics.
+
+Only compact counts are allowed.
 
 ## Surface Connectivity Contract
 
-After ring-plane gating, the child-colored region should be the connected distal child-side component.
+After ring-plane gating or clipping, the child-colored region should be the connected distal child-side component.
 
 If disconnected child-colored patches remain proximal to the ring or isolated around the parent wall, they must be reassigned to parent or the output must be:
 
@@ -174,32 +261,23 @@ The goal is a visually continuous child branch segment beginning at the `branch_
 
 Bifurcation output must stay minimal.
 
-Use visible rings only when they represent distinct operational boundaries:
+Internal bifurcation topology may stay in compact JSON.
 
-```text
-parent_pre_bifurcation only if distinct and useful
-branch_start for child branch starts
-```
+Do not write non-`branch_start` bifurcation rings to `boundary_rings.vtp` by default.
 
-Preserve measurable parent-to-daughter separation.
-
-Do not collapse bifurcation rings into one point unless the geometry has no measurable separation.
-
-`branch_end` rings are not written by default.
-
-Duplicate `daughter_start` rings are not written by default.
-
-If a `daughter_start` concept is needed for JSON topology, it should reference the corresponding `branch_start` ring ID instead of creating duplicate visible geometry in `boundary_rings.vtp`.
+Do not collapse bifurcation topology in JSON unless the geometry has no measurable separation.
 
 ## Acceptance Authority
 
 The final authority is:
 
 ```text
+branch_start-only visible rings
 clean circular ring placement
 surface-cut evidence
 ring-to-color consistency
 parent-child surface assignment consistency
+child vessel contour consistency
 minimal output contract compliance
 ```
 

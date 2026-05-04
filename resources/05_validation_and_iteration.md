@@ -7,6 +7,7 @@ Every run must validate only the minimal outputs.
 The main visual inspection target is:
 
 ```text
+branch_start-only visible rings
 ring-to-color consistency
 branch color must begin at the branch_start ring
 ```
@@ -41,6 +42,10 @@ If any required output is missing, the run is:
 failed
 ```
 
+Extra output files are forbidden by default.
+
+A future prompt must explicitly change this contract before any extra output files are added.
+
 ## VTP Array Check
 
 `outputs/segmented_surface.vtp` must contain only these required cell arrays:
@@ -65,7 +70,23 @@ Confidence
 Status
 ```
 
-No extra VTP arrays are allowed unless a future prompt explicitly requests them.
+Extra VTP arrays are forbidden by default.
+
+A future prompt must explicitly change this contract before any extra VTP arrays are added.
+
+Forbidden VTP arrays include:
+
+```text
+ring plane distance
+tolerance
+clip status
+original cell id
+debug flags
+region id
+parent-side violation
+connectivity region
+candidate metrics
+```
 
 ## JSON Check
 
@@ -109,15 +130,51 @@ If topology fallback is used, the ring must be:
 requires_review
 ```
 
-If `selected_offset_mm` is `0.0`, the JSON must prove surface-cut validation at that location or the ring must be:
+If `selected_offset_mm` is `0.0`, the JSON must prove surface-cut validation at that location through `zero_offset_proof_passed = true` or the ring must be:
 
 ```text
 requires_review
 ```
 
+Unproven zero-offset `branch_start` rings are not clean operational rings.
+
+Unproven zero-offset rings must be suppressed from default `boundary_rings.vtp` and reported in JSON.
+
 The topology start is only a search origin.
 
-topology-only branch_start rings must be requires_review.
+Topology-only `branch_start` rings must be `requires_review`.
+
+## Visible Ring Minimalism Check
+
+`boundary_rings.vtp` is an interface file.
+
+By default, `boundary_rings.vtp` must contain only `RingType = branch_start`.
+
+`visible_ring_count` must equal `branch_start_ring_count`.
+
+`non_branch_start_visible_ring_count` must be `0`.
+
+If `visible_ring_count` is greater than `branch_start_ring_count`, the run must be:
+
+```text
+requires_review
+```
+
+or:
+
+```text
+failed
+```
+
+No `parent_pre_bifurcation` rings are visible by default.
+
+No `aortic_body_start` or `aortic_body_end` rings are visible by default.
+
+No `branch_end` rings are visible by default.
+
+No `daughter_start` rings are visible by default.
+
+The visible ring count must be checked against the number of visible branch starts. A mismatch means the visual interface is cluttered and must not be marked success.
 
 ## Ring And Surface Agreement
 
@@ -145,17 +202,35 @@ or:
 failed
 ```
 
-For each `branch_start` ring, validate that child `SegmentColor` begins at that ring.
+For each visible `branch_start` ring, validate that child `SegmentColor` begins at that ring.
 
-Check that child color does not extend proximal to the ring plane beyond tolerance.
+Check that child color does not extend proximal to the ring plane by more than:
 
-Surface cells on the parent side of the ring plane must be reassigned to parent.
+```text
+RING_PLANE_ASSIGNMENT_TOLERANCE_MM = 0.10
+```
+
+Allowed tolerance range:
+
+```text
+0.05 mm to 0.15 mm
+```
+
+Any tolerance above `0.15 mm` must force `requires_review` unless explicitly justified.
+
+No branch color may extend beyond the branch_start ring by more than `0.10 mm`.
+
+No child-colored cells may remain on parent/aortic or neighboring vessel contour when status is `success`.
+
+Surface cells on the parent side of the ring plane must be reassigned to parent, clipped, or counted against success.
 
 Check:
 
 ```text
 ring_plane_parent_side_violation_count
 cells_ambiguous_near_ring_count
+segments_with_color_crossing_ring_count
+segments_with_neighbor_contour_leak_count
 ```
 
 If any branch has color crossing the ring, status must be:
@@ -176,36 +251,23 @@ If projection-only assignment is still used, status must be:
 requires_review
 ```
 
-## Visible Ring Minimalism Check
+If visual boundary cannot be clean with recoloring, `vtkClipPolyData` or equivalent clipping is required.
 
-`boundary_rings.vtp` ring count should be minimal.
+If clipping is not implemented and visual mismatch remains, status must be `requires_review`.
 
-`boundary_rings.vtp` is a minimal interface output.
+## Ambiguous Near-Ring Check
 
-Default visible rings should be only:
+Ambiguous near-ring cells are not harmless.
 
-```text
-aortic_body_start
-aortic_body_end
-branch_start
-parent_pre_bifurcation only if distinct and useful
-```
+`ambiguous_near_ring_total` must be reported.
 
-`branch_end` rings are not written by default.
+`ambiguous_near_ring_total` must not be high if status is `success`.
 
-Duplicate `daughter_start` rings are not written by default.
+`high_ambiguity_ring_count` must be reported.
 
-`branch_end` rings should not be visible by default.
+If `cells_ambiguous_near_ring_count` is greater than 5% of the child segment cell count, that branch ring must be `requires_review` unless clipping resolves the ambiguity.
 
-Duplicate `daughter_start` rings should not be visible by default.
-
-The visible ring count should roughly equal:
-
-```text
-branch_start_ring_count
-+ aortic_body_start/end
-+ distinct parent_pre_bifurcation rings if retained
-```
+The code must not report `ring_surface_consistency_status = success` while thousands of cells remain ambiguous around that ring unless those cells were clipped/resolved or explicitly justified.
 
 ## Diagnostics Contract
 
@@ -233,6 +295,7 @@ algorithm
 branch_count
 refined_ring_count
 topology_fallback_ring_count
+zero_offset_unproven_ring_count
 stable_candidate_found_count
 parent_contamination_detected_count
 cells_reassigned_to_parent_total
@@ -245,6 +308,7 @@ Allowed `visible_rings` fields:
 ```text
 visible_ring_count
 branch_start_ring_count
+non_branch_start_visible_ring_count
 hidden_or_suppressed_duplicate_ring_count
 branch_end_rings_suppressed
 duplicate_daughter_start_rings_suppressed
@@ -257,7 +321,12 @@ surface_assignment_mode
 ring_plane_assignment_tolerance_mm
 ring_plane_parent_side_violation_total
 ambiguous_near_ring_total
+high_ambiguity_ring_count
+clip_boundary_used
+clip_boundary_required_count
+clip_boundary_unresolved_count
 segments_with_color_crossing_ring_count
+segments_with_neighbor_contour_leak_count
 cells_reassigned_to_parent_total
 cells_reassigned_to_child_total
 rings_requiring_review
@@ -273,6 +342,10 @@ segment_label
 surface_assignment_mode
 ring_plane_assignment_tolerance_mm
 selected_offset_mm
+zero_offset_proof_passed
+clip_boundary_used
+clip_boundary_required
+clip_boundary_unresolved
 status
 classification
 confidence
@@ -282,6 +355,7 @@ cells_reassigned_to_parent_count
 cells_reassigned_to_child_count
 cells_ambiguous_near_ring_count
 ring_plane_parent_side_violation_count
+neighbor_contour_leak_count
 ring_surface_consistency_status
 ```
 
@@ -290,11 +364,15 @@ ring_surface_consistency_status
 ```text
 visible_ring_count
 branch_start_ring_count
-hidden_or_suppressed_duplicate_ring_count
+non_branch_start_visible_ring_count
 ring_plane_assignment_tolerance_mm
-ring_plane_parent_side_violation_total
 ambiguous_near_ring_total
+high_ambiguity_ring_count
+clip_boundary_used
+clip_boundary_required_count
+clip_boundary_unresolved_count
 segments_with_color_crossing_ring_count
+segments_with_neighbor_contour_leak_count
 ```
 
 Do not add per-cell diagnostics.
@@ -324,7 +402,7 @@ Every code iteration must target the smallest specific failure.
 For the next code prompt, the only allowed target is:
 
 ```text
-ring-plane-gated surface assignment and visible ring minimalism
+branch_start-only visible rings, ring-plane-gated or clipped surface assignment, and child vessel contour consistency
 ```
 
 Do not add output files, VTP arrays, per-cell diagnostics, broad helpers, or architecture while validating this target.

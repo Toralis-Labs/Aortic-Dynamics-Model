@@ -5,7 +5,7 @@
 This branch solves only one problem:
 
 ```text
-Make segmented_surface.vtp colors obey the selected visible branch_start rings while keeping boundary_rings.vtp minimal and operational.
+Make segmented_surface.vtp colors begin cleanly at the selected branch_start rings while boundary_rings.vtp shows only operational branch_start rings by default.
 ```
 
 The result must be a minimal segmented surface plus minimal ring and JSON metadata.
@@ -14,17 +14,21 @@ The result must be a minimal segmented surface plus minimal ring and JSON metada
 
 The earlier failure was mostly ring placement.
 
-The current failure is now surface assignment consistency and visible ring minimalism:
+The current failure is now visible interface minimalism and surface boundary correctness:
 
 ```text
-branch_start rings are improved, but colors still cross the ring boundary
+branch_start rings are improved, but there are still too many visible circles and colors may still cross the branch_start boundary
 ```
 
-Some child segment colors extend proximal to the `branch_start` circle.
+There are more visible rings than useful visible branch starts.
 
-Too many visible rings also clutter the interface.
+Some visible rings are not useful for the interface and create visual noise.
 
-Some `daughter_start` rings duplicate `branch_start` rings, and routine `branch_end` rings distract from the segment-start boundaries the user needs to inspect.
+Some child segment colors extend proximal to the `branch_start` circle or onto parent/aortic or neighboring vessel surface.
+
+The start circle for some branch parents is still not a valid clean interface ring.
+
+Unproven zero-offset `branch_start` rings are not clean operational rings.
 
 The problem is no longer primarily:
 
@@ -35,19 +39,21 @@ move the branch_start rings again
 The next code change should make:
 
 ```text
-segmented_surface.vtp respect boundary_rings.vtp
+segmented_surface.vtp itself visually correct at boundary_rings.vtp branch_start rings
 ```
 
 The code must prevent child branches from including parent/aortic wall proximal to the selected `branch_start` ring.
+
+The code must make the surface itself visually correct, not just add diagnostics.
 
 ## Required Fix
 
 The solution is:
 
 ```text
+branch_start-only visible rings
 ring-to-color consistency
-ring-plane-gated surface assignment
-minimal operational visible rings
+ring-plane-gated or clipped surface assignment
 ```
 
 The branch color must begin at the `branch_start` ring.
@@ -55,6 +61,10 @@ The branch color must begin at the `branch_start` ring.
 The selected `branch_start` ring defines where the child segment starts.
 
 Surface assignment by centerline projection alone is insufficient for steep branches because parent-wall cells may project onto the child centerline after the selected offset.
+
+Cell recoloring is not enough if the visual boundary is wrong.
+
+If whole-cell recoloring cannot make the visible color boundary match the circular ring, the implementation must use `vtkClipPolyData` or equivalent polygonal clipping/splitting logic, or mark the result `requires_review`.
 
 The topology start is only a search origin.
 
@@ -108,13 +118,13 @@ Do not change the label rules while fixing ring placement.
 Success means:
 
 ```text
-branch_start rings do not begin on parent/aortic wall
-bifurcation rings are actual circular cut-boundaries
+boundary_rings.vtp contains only operational branch_start rings by default
+visible_ring_count must equal branch_start_ring_count
 segmented_surface.vtp agrees with boundary_rings.vtp
 branch color must begin at the branch_start ring
-child color does not extend proximal to the branch_start ring plane beyond tolerance
-boundary_rings.vtp is a minimal interface output
-segmentation_result.json is compact and bounded
+child color does not extend proximal to the branch_start ring plane beyond 0.10 mm tolerance
+the color should follow the child vessel contour, not surrounding vessels
+ambiguous near-ring cells are not harmless and are resolved or counted against success
 required outputs remain minimal
-uncertain topology-only rings are requires_review
+uncertain topology-only or unproven zero-offset rings are requires_review and hidden from default visible rings
 ```
