@@ -1,2 +1,2 @@
-"""STEP4 infrarenal measurement scaffold."""
+"""STEP4 EVAR geometry measurements."""
 

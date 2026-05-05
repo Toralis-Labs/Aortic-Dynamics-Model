@@ -131,10 +131,10 @@ def build_manifest(args: argparse.Namespace) -> Dict[str, Any]:
             contract_path=paths.step3_dir / "step3_naming_orientation_contract.json",
         ),
         _step_row(
-            "step4_infrarenal_neck",
+            "step4_evar_geometry_measurements",
             {
                 "measurements_json": paths.step4_dir / "step4_measurements.json",
-                "colored_vtp": paths.step4_dir / "infrarenal_neck_colored.vtp",
+                "measurement_regions_vtp": paths.step4_dir / "step4_evar_geometry_regions.vtp",
             },
             contract_path=paths.step4_dir / "step4_measurements.json",
         ),
