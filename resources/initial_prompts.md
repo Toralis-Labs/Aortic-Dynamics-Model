@@ -11,8 +11,9 @@ device workflows can consume.
 - STEP2 authors the geometry contract: aorta inlet, pre-bifurcation aorta end, bounded
   vessel-like surface segments, a single aorta trunk centerline, and assignment QA.
 - STEP3 consumes STEP2 geometry and adds anatomical vessel names and landmark metadata.
-- STEP4 will measure infrarenal neck, iliac, renal-to-bifurcation, access, and aneurysm
-  quantities from STEP3 anatomy.
+- STEP4 will measure aortic neck, iliac, common iliac, external iliac, internal iliac,
+  renal-to-internal-iliac path length, and access-vessel lumen geometry measurements
+  from STEP3 anatomy.
 - STEP5 validates required step outputs and aggregates statuses/warnings.
 
 ## Core Principles

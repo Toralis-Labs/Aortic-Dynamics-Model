@@ -13,7 +13,7 @@
 
 - STEP2: `step2_geometry_contract.py`
 - STEP3: `step3_naming_orientation.py`
-- STEP4: `step4_infrarenal_neck.py`
+- STEP4: `step4_evar_geometry_measurements.py`
 - STEP5: `step5_pipeline_manifest.py`
 
 ## STEP2
@@ -39,9 +39,18 @@
 
 ## STEP4
 
-- STEP4 writes grouped machine-readable measurements.
+- STEP4 is the EVAR lumen-geometry measurement layer described in
+  `resources/step4_measurement_contract.md`.
+- STEP4 writes grouped machine-readable measurements to `step4_measurements.json`.
+- STEP4 visual/debug regions are written to `step4_evar_geometry_regions.vtp`.
 - Unmeasurable individual values use `{ "status": "unmeasurable" }`.
-- Missing required iliac diameter series is a hard failure once STEP4 is implemented.
+- Missing required anatomy for a measurement group marks that group as
+  `unmeasurable` or `requires_review`.
+- Missing internal iliac anatomy should not globally fail STEP4 if standard
+  AAA/Conformable measurements can still run.
+- Global failure applies only if STEP3 inputs are missing/unusable or required
+  aortic/iliac anatomy is so incomplete that STEP4 cannot produce a trustworthy
+  contract.
 
 ## Demo Face Map
 

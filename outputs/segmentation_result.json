@@ -1,0 +1,1789 @@
+{
+  "status": "requires_review",
+  "inputs": {
+    "surface": "inputs/surface_cleaned.vtp",
+    "centerline_network": "inputs/centerline_network.vtp",
+    "centerline_metadata": "inputs/centerline_network_metadata.json",
+    "input_roles": "inputs/input_roles.json",
+    "aortic_inlet_face_id": 2,
+    "terminal_face_ids": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "terminal_face_to_node": {
+      "3": 14,
+      "4": 12,
+      "5": 6,
+      "6": 8,
+      "7": 17,
+      "8": 13,
+      "9": 9,
+      "10": 16,
+      "11": 15,
+      "12": 10
+    }
+  },
+  "outputs": {
+    "segmented_surface": "outputs/segmented_surface.vtp",
+    "boundary_rings": "outputs/boundary_rings.vtp",
+    "segmentation_result": "outputs/segmentation_result.json",
+    "segmentation_diagnostics": "outputs/segmentation_diagnostics.json"
+  },
+  "segments": [
+    {
+      "segment_id": 1,
+      "segment_label": "aortic_body",
+      "segment_type": "aortic_body",
+      "parent_segment_id": null,
+      "child_segment_ids": [
+        2,
+        5,
+        6,
+        7,
+        8,
+        9,
+        12
+      ],
+      "proximal_ring_id": 1,
+      "distal_ring_ids": [
+        2
+      ],
+      "cell_count": 40691,
+      "status": "requires_review",
+      "warnings": [
+        "aortic_body extent is a first-pass topology estimate"
+      ]
+    },
+    {
+      "segment_id": 2,
+      "segment_label": "branch_001",
+      "segment_type": "branch",
+      "parent_segment_id": 1,
+      "child_segment_ids": [
+        3,
+        4
+      ],
+      "proximal_ring_id": 3,
+      "distal_ring_ids": [],
+      "cell_count": 19893,
+      "status": "requires_review",
+      "warnings": [
+        "branch segment is a first-pass topology estimate"
+      ]
+    },
+    {
+      "segment_id": 3,
+      "segment_label": "branch_002",
+      "segment_type": "branch",
+      "parent_segment_id": 2,
+      "child_segment_ids": [],
+      "proximal_ring_id": 4,
+      "distal_ring_ids": [
+        5
+      ],
+      "cell_count": 18771,
+      "status": "requires_review",
+      "warnings": [
+        "branch segment is a first-pass topology estimate"
+      ]
+    },
+    {
+      "segment_id": 4,
+      "segment_label": "branch_003",
+      "segment_type": "branch",
+      "parent_segment_id": 2,
+      "child_segment_ids": [],
+      "proximal_ring_id": 6,
+      "distal_ring_ids": [
+        7
+      ],
+      "cell_count": 20210,
+      "status": "requires_review",
+      "warnings": [
+        "branch segment is a first-pass topology estimate"
+      ]
+    },
+    {
+      "segment_id": 5,
+      "segment_label": "branch_004",
+      "segment_type": "branch",
+      "parent_segment_id": 1,
+      "child_segment_ids": [],
+      "proximal_ring_id": 8,
+      "distal_ring_ids": [
+        9
+      ],
+      "cell_count": 26915,
+      "status": "requires_review",
+      "warnings": [
+        "branch segment is a first-pass topology estimate"
+      ]
+    },
+    {
+      "segment_id": 6,
+      "segment_label": "branch_005",
+      "segment_type": "branch",
+      "parent_segment_id": 1,
+      "child_segment_ids": [],
+      "proximal_ring_id": 10,
+      "distal_ring_ids": [
+        11
+      ],
+      "cell_count": 32429,
+      "status": "requires_review",
+      "warnings": [
+        "branch segment is a first-pass topology estimate"
+      ]
+    },
+    {
+      "segment_id": 7,
+      "segment_label": "branch_006",
+      "segment_type": "branch",
+      "parent_segment_id": 1,
+      "child_segment_ids": [],
+      "proximal_ring_id": 12,
+      "distal_ring_ids": [
+        13
+      ],
+      "cell_count": 24378,
+      "status": "requires_review",
+      "warnings": [
+        "branch segment is a first-pass topology estimate"
+      ]
+    },
+    {
+      "segment_id": 8,
+      "segment_label": "branch_007",
+      "segment_type": "branch",
+      "parent_segment_id": 1,
+      "child_segment_ids": [],
+      "proximal_ring_id": 14,
+      "distal_ring_ids": [
+        15
+      ],
+      "cell_count": 13939,
+      "status": "requires_review",
+      "warnings": [
+        "branch segment is a first-pass topology estimate"
+      ]
+    },
+    {
+      "segment_id": 9,
+      "segment_label": "branch_008",
+      "segment_type": "branch",
+      "parent_segment_id": 1,
+      "child_segment_ids": [
+        10,
+        11
+      ],
+      "proximal_ring_id": 16,
+      "distal_ring_ids": [],
+      "cell_count": 5042,
+      "status": "requires_review",
+      "warnings": [
+        "branch segment is a first-pass topology estimate"
+      ]
+    },
+    {
+      "segment_id": 10,
+      "segment_label": "branch_009",
+      "segment_type": "branch",
+      "parent_segment_id": 9,
+      "child_segment_ids": [],
+      "proximal_ring_id": 17,
+      "distal_ring_ids": [
+        18
+      ],
+      "cell_count": 4752,
+      "status": "requires_review",
+      "warnings": [
+        "branch segment is a first-pass topology estimate"
+      ]
+    },
+    {
+      "segment_id": 11,
+      "segment_label": "branch_010",
+      "segment_type": "branch",
+      "parent_segment_id": 9,
+      "child_segment_ids": [],
+      "proximal_ring_id": 19,
+      "distal_ring_ids": [
+        20
+      ],
+      "cell_count": 5442,
+      "status": "requires_review",
+      "warnings": [
+        "branch segment is a first-pass topology estimate"
+      ]
+    },
+    {
+      "segment_id": 12,
+      "segment_label": "branch_011",
+      "segment_type": "branch",
+      "parent_segment_id": 1,
+      "child_segment_ids": [
+        13,
+        14
+      ],
+      "proximal_ring_id": 21,
+      "distal_ring_ids": [],
+      "cell_count": 5784,
+      "status": "requires_review",
+      "warnings": [
+        "branch segment is a first-pass topology estimate"
+      ]
+    },
+    {
+      "segment_id": 13,
+      "segment_label": "branch_012",
+      "segment_type": "branch",
+      "parent_segment_id": 12,
+      "child_segment_ids": [],
+      "proximal_ring_id": 22,
+      "distal_ring_ids": [
+        23
+      ],
+      "cell_count": 11021,
+      "status": "requires_review",
+      "warnings": [
+        "branch segment is a first-pass topology estimate"
+      ]
+    },
+    {
+      "segment_id": 14,
+      "segment_label": "branch_013",
+      "segment_type": "branch",
+      "parent_segment_id": 12,
+      "child_segment_ids": [],
+      "proximal_ring_id": 24,
+      "distal_ring_ids": [
+        25
+      ],
+      "cell_count": 3370,
+      "status": "requires_review",
+      "warnings": [
+        "branch segment is a first-pass topology estimate"
+      ]
+    }
+  ],
+  "boundary_rings": [
+    {
+      "ring_id": 1,
+      "ring_label": "ring_001",
+      "ring_type": "aortic_body_start",
+      "center_xyz": [
+        -1.4198260467905264,
+        13.00392460465366,
+        87.34099552342846
+      ],
+      "normal_xyz": [
+        0.24412980871135065,
+        0.25737556705358994,
+        -0.9349644132171034
+      ],
+      "radius_mm": 1.2113795951972754,
+      "source_segment_id": 1,
+      "parent_segment_id": null,
+      "child_segment_id": null,
+      "source_centerline_s_mm": 0.0,
+      "orientation_rule": "perpendicular_to_aortic_body_centerline_tangent",
+      "radius_rule": "local_equivalent_diameter_over_2",
+      "confidence": 0.9,
+      "status": "success",
+      "warnings": []
+    },
+    {
+      "ring_id": 2,
+      "ring_label": "ring_002",
+      "ring_type": "aortic_body_end",
+      "center_xyz": [
+        -1.0228465795516968,
+        17.346933364868164,
+        65.88009643554688
+      ],
+      "normal_xyz": [
+        0.4450307814685171,
+        0.07629034496822039,
+        -0.8922597081624559
+      ],
+      "radius_mm": 0.9192126373402927,
+      "source_segment_id": 1,
+      "parent_segment_id": null,
+      "child_segment_id": null,
+      "source_centerline_s_mm": 23.528727826606282,
+      "orientation_rule": "perpendicular_to_aortic_body_centerline_tangent",
+      "radius_rule": "estimated",
+      "confidence": 0.55,
+      "status": "requires_review",
+      "warnings": [
+        "aortic_body_end is a first-pass topology boundary"
+      ]
+    },
+    {
+      "ring_id": 3,
+      "ring_label": "ring_003",
+      "ring_type": "branch_start",
+      "center_xyz": [
+        -1.9555439949035645,
+        14.788565635681152,
+        79.92728424072266
+      ],
+      "normal_xyz": [
+        -0.4547438630585771,
+        0.8224495285641362,
+        -0.34173789953002315
+      ],
+      "radius_mm": 1.4302998377540623,
+      "source_segment_id": 2,
+      "parent_segment_id": 1,
+      "child_segment_id": 2,
+      "source_centerline_s_mm": 0.0,
+      "orientation_rule": "perpendicular_to_child_centerline_tangent",
+      "radius_rule": "stable_child_tube_equivalent_radius",
+      "confidence": 0.62,
+      "status": "requires_review",
+      "warnings": [
+        "zero-offset branch_start was not accepted as proven clean daughter boundary",
+        "branch_start stable daughter reference was weak and requires visual review"
+      ],
+      "selection_algorithm": "surface_validated_branch_start_ring_v1",
+      "topology_start_xyz": [
+        -1.9555439949035645,
+        14.788565635681152,
+        79.92728424072266
+      ],
+      "selected_offset_mm": 0.0,
+      "search_max_mm": 1.113092985095429,
+      "candidate_count": 8,
+      "accepted_candidate_count": 1,
+      "selected_candidate_classification": "stable_child_tube",
+      "selected_radius_rule": "stable_child_tube_equivalent_radius",
+      "surface_cut_used": true,
+      "backward_refinement_used": true,
+      "zero_offset_proof_passed": false,
+      "cells_reassigned_to_parent_count": 0,
+      "surface_assignment_adjusted": true,
+      "candidate_summary": {
+        "first_stable_offset_mm": 0.0,
+        "selected_offset_mm": 0.0,
+        "reference_offset_mm": 0.25,
+        "reference_radius_mm": 1.435277,
+        "best_stability_offset_mm": 0.0,
+        "lowest_contamination_offset_mm": 0.05,
+        "rejected_too_proximal_count": 0,
+        "invalid_cut_count": 0,
+        "fallback_used": false,
+        "zero_offset_selected": true,
+        "zero_offset_proof_passed": false,
+        "zero_offset_success_forbidden_reason": "zero-offset compactness was not comparable to the distal stable reference",
+        "selected_reason": "most proximal clean candidate before parent contamination",
+        "surface_assignment_adjusted": true,
+        "cells_reassigned_to_parent_count": 0
+      },
+      "surface_assignment_mode": "clipped_ring_boundary",
+      "ring_plane_assignment_tolerance_mm": 0.1,
+      "clip_boundary_used": true,
+      "clip_boundary_required": true,
+      "clip_boundary_unresolved": false,
+      "cells_reassigned_to_child_count": 122,
+      "cells_ambiguous_near_ring_count": 0,
+      "ring_plane_parent_side_violation_count": 0,
+      "neighbor_contour_leak_count": 0,
+      "connected_component_cleanup_reassigned_count": 0,
+      "ring_surface_consistency_status": "success"
+    },
+    {
+      "ring_id": 4,
+      "ring_label": "ring_004",
+      "ring_type": "branch_start",
+      "center_xyz": [
+        -2.1618193669106134,
+        18.603759782908657,
+        79.26926478840566
+      ],
+      "normal_xyz": [
+        0.4529057214765754,
+        0.7069807557180678,
+        0.5431893026359159
+      ],
+      "radius_mm": 0.3457614505940327,
+      "source_segment_id": 3,
+      "parent_segment_id": 2,
+      "child_segment_id": 3,
+      "source_centerline_s_mm": 1.15,
+      "orientation_rule": "perpendicular_to_child_centerline_tangent",
+      "radius_rule": "stable_child_tube_equivalent_radius",
+      "confidence": 0.68,
+      "status": "requires_review",
+      "warnings": [
+        "proximal parent-wall contamination was detected and rejected before selecting this branch_start ring",
+        "near-ring ambiguity exceeds 5 percent of the child segment surface cell count"
+      ],
+      "selection_algorithm": "surface_validated_branch_start_ring_v1",
+      "topology_start_xyz": [
+        -2.489469289779663,
+        17.568758010864258,
+        78.96595764160156
+      ],
+      "selected_offset_mm": 1.15,
+      "search_max_mm": 1.4950936747415957,
+      "candidate_count": 17,
+      "accepted_candidate_count": 1,
+      "selected_candidate_classification": "stable_child_tube",
+      "selected_radius_rule": "stable_child_tube_equivalent_radius",
+      "surface_cut_used": true,
+      "backward_refinement_used": true,
+      "zero_offset_proof_passed": false,
+      "cells_reassigned_to_parent_count": 2706,
+      "surface_assignment_adjusted": true,
+      "candidate_summary": {
+        "first_stable_offset_mm": 1.15,
+        "selected_offset_mm": 1.15,
+        "reference_offset_mm": 1.25,
+        "reference_radius_mm": 0.347746,
+        "best_stability_offset_mm": 1.25,
+        "lowest_contamination_offset_mm": 1.15,
+        "rejected_too_proximal_count": 14,
+        "invalid_cut_count": 0,
+        "fallback_used": false,
+        "zero_offset_selected": false,
+        "zero_offset_proof_passed": false,
+        "zero_offset_success_forbidden_reason": "",
+        "selected_reason": "last clean candidate before proximal parent contamination",
+        "surface_assignment_adjusted": true,
+        "cells_reassigned_to_parent_count": 2706
+      },
+      "surface_assignment_mode": "clipped_ring_boundary",
+      "ring_plane_assignment_tolerance_mm": 0.1,
+      "clip_boundary_used": true,
+      "clip_boundary_required": true,
+      "clip_boundary_unresolved": false,
+      "cells_reassigned_to_child_count": 0,
+      "cells_ambiguous_near_ring_count": 1691,
+      "ring_plane_parent_side_violation_count": 0,
+      "neighbor_contour_leak_count": 0,
+      "connected_component_cleanup_reassigned_count": 0,
+      "ring_surface_consistency_status": "requires_review"
+    },
+    {
+      "ring_id": 5,
+      "ring_label": "ring_005",
+      "ring_type": "branch_end",
+      "center_xyz": [
+        -2.318370042171279,
+        19.49508574779824,
+        81.71461982587046
+      ],
+      "normal_xyz": [
+        -0.7998008332052869,
+        0.25593808685919756,
+        0.5429680680288507
+      ],
+      "radius_mm": 0.33803975076347087,
+      "source_segment_id": 3,
+      "parent_segment_id": 2,
+      "child_segment_id": 3,
+      "source_centerline_s_mm": 4.271696213547417,
+      "orientation_rule": "perpendicular_to_branch_centerline_tangent_near_segment_end",
+      "radius_rule": "local_equivalent_diameter_over_2",
+      "confidence": 0.85,
+      "status": "success",
+      "warnings": []
+    },
+    {
+      "ring_id": 6,
+      "ring_label": "ring_006",
+      "ring_type": "branch_start",
+      "center_xyz": [
+        -1.616139711415015,
+        17.985404794347563,
+        79.04163903925081
+      ],
+      "normal_xyz": [
+        0.9587009213233757,
+        0.19128926997664572,
+        0.21047792911731267
+      ],
+      "radius_mm": 0.3450053720139192,
+      "source_segment_id": 4,
+      "parent_segment_id": 2,
+      "child_segment_id": 4,
+      "source_centerline_s_mm": 1.0,
+      "orientation_rule": "perpendicular_to_child_centerline_tangent",
+      "radius_rule": "stable_child_tube_equivalent_radius",
+      "confidence": 0.84,
+      "status": "success",
+      "warnings": [
+        "proximal parent-wall contamination was detected and rejected before selecting this branch_start ring"
+      ],
+      "selection_algorithm": "surface_validated_branch_start_ring_v1",
+      "topology_start_xyz": [
+        -2.489469289779663,
+        17.568758010864258,
+        78.96595764160156
+      ],
+      "selected_offset_mm": 1.0,
+      "search_max_mm": 2.8239530781844677,
+      "candidate_count": 33,
+      "accepted_candidate_count": 1,
+      "selected_candidate_classification": "stable_child_tube",
+      "selected_radius_rule": "stable_child_tube_equivalent_radius",
+      "surface_cut_used": true,
+      "backward_refinement_used": true,
+      "zero_offset_proof_passed": false,
+      "cells_reassigned_to_parent_count": 3629,
+      "surface_assignment_adjusted": true,
+      "candidate_summary": {
+        "first_stable_offset_mm": 1.0,
+        "selected_offset_mm": 1.0,
+        "reference_offset_mm": 2.5,
+        "reference_radius_mm": 0.297334,
+        "best_stability_offset_mm": 2.3,
+        "lowest_contamination_offset_mm": 2.3,
+        "rejected_too_proximal_count": 12,
+        "invalid_cut_count": 0,
+        "fallback_used": false,
+        "zero_offset_selected": false,
+        "zero_offset_proof_passed": false,
+        "zero_offset_success_forbidden_reason": "",
+        "selected_reason": "last clean candidate before proximal parent contamination",
+        "surface_assignment_adjusted": true,
+        "cells_reassigned_to_parent_count": 3629
+      },
+      "surface_assignment_mode": "clipped_ring_boundary",
+      "ring_plane_assignment_tolerance_mm": 0.1,
+      "clip_boundary_used": true,
+      "clip_boundary_required": true,
+      "clip_boundary_unresolved": false,
+      "cells_reassigned_to_child_count": 0,
+      "cells_ambiguous_near_ring_count": 715,
+      "ring_plane_parent_side_violation_count": 0,
+      "neighbor_contour_leak_count": 0,
+      "connected_component_cleanup_reassigned_count": 0,
+      "ring_surface_consistency_status": "success"
+    },
+    {
+      "ring_id": 7,
+      "ring_label": "ring_007",
+      "ring_type": "branch_end",
+      "center_xyz": [
+        1.8023549270050683,
+        22.373471677580206,
+        79.32012915291216
+      ],
+      "normal_xyz": [
+        0.14526391972750727,
+        0.45671892192233354,
+        -0.8776709064242142
+      ],
+      "radius_mm": 0.25327340682535715,
+      "source_segment_id": 4,
+      "parent_segment_id": 2,
+      "child_segment_id": 4,
+      "source_centerline_s_mm": 8.068437366241337,
+      "orientation_rule": "perpendicular_to_branch_centerline_tangent_near_segment_end",
+      "radius_rule": "local_equivalent_diameter_over_2",
+      "confidence": 0.85,
+      "status": "success",
+      "warnings": []
+    },
+    {
+      "ring_id": 8,
+      "ring_label": "ring_008",
+      "ring_type": "branch_start",
+      "center_xyz": [
+        -2.1592258797559003,
+        16.943077586812382,
+        77.50450274471021
+      ],
+      "normal_xyz": [
+        0.043108564217966244,
+        0.9905188347183619,
+        0.13043806867339056
+      ],
+      "radius_mm": 0.518130879752886,
+      "source_segment_id": 5,
+      "parent_segment_id": 1,
+      "child_segment_id": 5,
+      "source_centerline_s_mm": 1.15,
+      "orientation_rule": "perpendicular_to_child_centerline_tangent",
+      "radius_rule": "stable_child_tube_equivalent_radius",
+      "confidence": 0.68,
+      "status": "requires_review",
+      "warnings": [
+        "proximal parent-wall contamination was detected and rejected before selecting this branch_start ring",
+        "child-colored near-ring cells outside the local branch corridor were reassigned to the parent segment"
+      ],
+      "selection_algorithm": "surface_validated_branch_start_ring_v1",
+      "topology_start_xyz": [
+        -2.160902738571167,
+        15.884684562683105,
+        77.21051025390625
+      ],
+      "selected_offset_mm": 1.15,
+      "search_max_mm": 3.1777149668398046,
+      "candidate_count": 28,
+      "accepted_candidate_count": 1,
+      "selected_candidate_classification": "stable_child_tube",
+      "selected_radius_rule": "stable_child_tube_equivalent_radius",
+      "surface_cut_used": true,
+      "backward_refinement_used": true,
+      "zero_offset_proof_passed": false,
+      "cells_reassigned_to_parent_count": 1416,
+      "surface_assignment_adjusted": true,
+      "candidate_summary": {
+        "first_stable_offset_mm": 1.15,
+        "selected_offset_mm": 1.15,
+        "reference_offset_mm": 1.75,
+        "reference_radius_mm": 0.415694,
+        "best_stability_offset_mm": 1.15,
+        "lowest_contamination_offset_mm": 1.15,
+        "rejected_too_proximal_count": 14,
+        "invalid_cut_count": 0,
+        "fallback_used": false,
+        "zero_offset_selected": false,
+        "zero_offset_proof_passed": false,
+        "zero_offset_success_forbidden_reason": "",
+        "selected_reason": "last clean candidate before proximal parent contamination",
+        "surface_assignment_adjusted": true,
+        "cells_reassigned_to_parent_count": 1416
+      },
+      "surface_assignment_mode": "clipped_ring_boundary",
+      "ring_plane_assignment_tolerance_mm": 0.1,
+      "clip_boundary_used": true,
+      "clip_boundary_required": true,
+      "clip_boundary_unresolved": false,
+      "cells_reassigned_to_child_count": 0,
+      "cells_ambiguous_near_ring_count": 871,
+      "ring_plane_parent_side_violation_count": 0,
+      "neighbor_contour_leak_count": 55,
+      "connected_component_cleanup_reassigned_count": 0,
+      "ring_surface_consistency_status": "requires_review"
+    },
+    {
+      "ring_id": 9,
+      "ring_label": "ring_009",
+      "ring_type": "branch_end",
+      "center_xyz": [
+        -2.339283577762564,
+        21.21704600663667,
+        74.10339492458365
+      ],
+      "normal_xyz": [
+        -0.22986339599985542,
+        -0.13342208515590734,
+        -0.9640339031237769
+      ],
+      "radius_mm": 0.3669324385103819,
+      "source_segment_id": 5,
+      "parent_segment_id": 1,
+      "child_segment_id": 5,
+      "source_centerline_s_mm": 9.079185619542299,
+      "orientation_rule": "perpendicular_to_branch_centerline_tangent_near_segment_end",
+      "radius_rule": "local_equivalent_diameter_over_2",
+      "confidence": 0.85,
+      "status": "success",
+      "warnings": []
+    },
+    {
+      "ring_id": 10,
+      "ring_label": "ring_010",
+      "ring_type": "branch_start",
+      "center_xyz": [
+        -1.0458049018734712,
+        16.328222638417678,
+        76.32530006769358
+      ],
+      "normal_xyz": [
+        0.8626328622863644,
+        0.2073661948589885,
+        -0.4613716572713787
+      ],
+      "radius_mm": 0.36759350252494216,
+      "source_segment_id": 6,
+      "parent_segment_id": 1,
+      "child_segment_id": 6,
+      "source_centerline_s_mm": 1.5,
+      "orientation_rule": "perpendicular_to_child_centerline_tangent",
+      "radius_rule": "stable_child_tube_equivalent_radius",
+      "confidence": 0.68,
+      "status": "requires_review",
+      "warnings": [
+        "proximal parent-wall contamination was detected and rejected before selecting this branch_start ring",
+        "child-colored near-ring cells outside the local branch corridor were reassigned to the parent segment",
+        "near-ring ambiguity exceeds 5 percent of the child segment surface cell count"
+      ],
+      "selection_algorithm": "surface_validated_branch_start_ring_v1",
+      "topology_start_xyz": [
+        -2.160902738571167,
+        15.884684562683105,
+        77.21051025390625
+      ],
+      "selected_offset_mm": 1.5,
+      "search_max_mm": 2.672413597934856,
+      "candidate_count": 38,
+      "accepted_candidate_count": 1,
+      "selected_candidate_classification": "stable_child_tube",
+      "selected_radius_rule": "stable_child_tube_equivalent_radius",
+      "surface_cut_used": true,
+      "backward_refinement_used": true,
+      "zero_offset_proof_passed": false,
+      "cells_reassigned_to_parent_count": 3989,
+      "surface_assignment_adjusted": true,
+      "candidate_summary": {
+        "first_stable_offset_mm": 1.5,
+        "selected_offset_mm": 1.5,
+        "reference_offset_mm": 2.672414,
+        "reference_radius_mm": 0.286849,
+        "best_stability_offset_mm": 2.572414,
+        "lowest_contamination_offset_mm": 1.75,
+        "rejected_too_proximal_count": 21,
+        "invalid_cut_count": 0,
+        "fallback_used": false,
+        "zero_offset_selected": false,
+        "zero_offset_proof_passed": false,
+        "zero_offset_success_forbidden_reason": "",
+        "selected_reason": "last clean candidate before proximal parent contamination",
+        "surface_assignment_adjusted": true,
+        "cells_reassigned_to_parent_count": 3989
+      },
+      "surface_assignment_mode": "clipped_ring_boundary",
+      "ring_plane_assignment_tolerance_mm": 0.1,
+      "clip_boundary_used": true,
+      "clip_boundary_required": true,
+      "clip_boundary_unresolved": false,
+      "cells_reassigned_to_child_count": 0,
+      "cells_ambiguous_near_ring_count": 1870,
+      "ring_plane_parent_side_violation_count": 0,
+      "neighbor_contour_leak_count": 708,
+      "connected_component_cleanup_reassigned_count": 0,
+      "ring_surface_consistency_status": "requires_review"
+    },
+    {
+      "ring_id": 11,
+      "ring_label": "ring_011",
+      "ring_type": "branch_end",
+      "center_xyz": [
+        3.9952024381887754,
+        14.508980974026782,
+        77.5634892714932
+      ],
+      "normal_xyz": [
+        0.8248542594246806,
+        -0.2858377492759743,
+        0.48776247477415385
+      ],
+      "radius_mm": 0.22845640601119935,
+      "source_segment_id": 6,
+      "parent_segment_id": 1,
+      "child_segment_id": 6,
+      "source_centerline_s_mm": 7.6354674226710175,
+      "orientation_rule": "perpendicular_to_branch_centerline_tangent_near_segment_end",
+      "radius_rule": "local_equivalent_diameter_over_2",
+      "confidence": 0.85,
+      "status": "success",
+      "warnings": []
+    },
+    {
+      "ring_id": 12,
+      "ring_label": "ring_012",
+      "ring_type": "branch_start",
+      "center_xyz": [
+        -3.235836400066504,
+        16.19056262453119,
+        76.26630037893528
+      ],
+      "normal_xyz": [
+        -0.9162777975893494,
+        0.060208384054094594,
+        -0.3959923586818389
+      ],
+      "radius_mm": 0.37905371878330096,
+      "source_segment_id": 7,
+      "parent_segment_id": 1,
+      "child_segment_id": 7,
+      "source_centerline_s_mm": 1.5,
+      "orientation_rule": "perpendicular_to_child_centerline_tangent",
+      "radius_rule": "stable_child_tube_equivalent_radius",
+      "confidence": 0.68,
+      "status": "requires_review",
+      "warnings": [
+        "proximal parent-wall contamination was detected and rejected before selecting this branch_start ring",
+        "child-colored near-ring cells outside the local branch corridor were reassigned to the parent segment",
+        "near-ring ambiguity exceeds 5 percent of the child segment surface cell count"
+      ],
+      "selection_algorithm": "surface_validated_branch_start_ring_v1",
+      "topology_start_xyz": [
+        -2.160902738571167,
+        15.884684562683105,
+        77.21051025390625
+      ],
+      "selected_offset_mm": 1.5,
+      "search_max_mm": 2.282952921049737,
+      "candidate_count": 33,
+      "accepted_candidate_count": 1,
+      "selected_candidate_classification": "stable_child_tube",
+      "selected_radius_rule": "stable_child_tube_equivalent_radius",
+      "surface_cut_used": true,
+      "backward_refinement_used": true,
+      "zero_offset_proof_passed": false,
+      "cells_reassigned_to_parent_count": 2069,
+      "surface_assignment_adjusted": true,
+      "candidate_summary": {
+        "first_stable_offset_mm": 1.5,
+        "selected_offset_mm": 1.5,
+        "reference_offset_mm": 2.282953,
+        "reference_radius_mm": 0.336728,
+        "best_stability_offset_mm": 2.282953,
+        "lowest_contamination_offset_mm": 2.282953,
+        "rejected_too_proximal_count": 21,
+        "invalid_cut_count": 0,
+        "fallback_used": false,
+        "zero_offset_selected": false,
+        "zero_offset_proof_passed": false,
+        "zero_offset_success_forbidden_reason": "",
+        "selected_reason": "last clean candidate before proximal parent contamination",
+        "surface_assignment_adjusted": true,
+        "cells_reassigned_to_parent_count": 2069
+      },
+      "surface_assignment_mode": "clipped_ring_boundary",
+      "ring_plane_assignment_tolerance_mm": 0.1,
+      "clip_boundary_used": true,
+      "clip_boundary_required": true,
+      "clip_boundary_unresolved": false,
+      "cells_reassigned_to_child_count": 0,
+      "cells_ambiguous_near_ring_count": 2264,
+      "ring_plane_parent_side_violation_count": 0,
+      "neighbor_contour_leak_count": 240,
+      "connected_component_cleanup_reassigned_count": 0,
+      "ring_surface_consistency_status": "requires_review"
+    },
+    {
+      "ring_id": 13,
+      "ring_label": "ring_013",
+      "ring_type": "branch_end",
+      "center_xyz": [
+        -7.54030142611478,
+        13.970893293227393,
+        76.40423514733412
+      ],
+      "normal_xyz": [
+        -0.7091546678570797,
+        -0.6983992733564379,
+        -0.09663390725679333
+      ],
+      "radius_mm": 0.21796928211516456,
+      "source_segment_id": 7,
+      "parent_segment_id": 1,
+      "child_segment_id": 7,
+      "source_centerline_s_mm": 6.522722631570677,
+      "orientation_rule": "perpendicular_to_branch_centerline_tangent_near_segment_end",
+      "radius_rule": "local_equivalent_diameter_over_2",
+      "confidence": 0.85,
+      "status": "success",
+      "warnings": []
+    },
+    {
+      "ring_id": 14,
+      "ring_label": "ring_014",
+      "ring_type": "branch_start",
+      "center_xyz": [
+        -0.7705298573820647,
+        19.867182591704164,
+        70.86503905576313
+      ],
+      "normal_xyz": [
+        -0.005211433359850055,
+        0.7503018864694637,
+        -0.6610748218792635
+      ],
+      "radius_mm": 0.2173263720737723,
+      "source_segment_id": 8,
+      "parent_segment_id": 1,
+      "child_segment_id": 8,
+      "source_centerline_s_mm": 1.75,
+      "orientation_rule": "perpendicular_to_child_centerline_tangent",
+      "radius_rule": "stable_child_tube_equivalent_radius",
+      "confidence": 0.68,
+      "status": "requires_review",
+      "warnings": [
+        "proximal parent-wall contamination was detected and rejected before selecting this branch_start ring",
+        "child-colored near-ring cells outside the local branch corridor were reassigned to the parent segment",
+        "near-ring ambiguity exceeds 5 percent of the child segment surface cell count"
+      ],
+      "selection_algorithm": "surface_validated_branch_start_ring_v1",
+      "topology_start_xyz": [
+        -1.2715588808059692,
+        18.53172492980957,
+        71.75062561035156
+      ],
+      "selected_offset_mm": 1.75,
+      "search_max_mm": 2.1801017583726434,
+      "candidate_count": 26,
+      "accepted_candidate_count": 1,
+      "selected_candidate_classification": "stable_child_tube",
+      "selected_radius_rule": "stable_child_tube_equivalent_radius",
+      "surface_cut_used": true,
+      "backward_refinement_used": true,
+      "zero_offset_proof_passed": false,
+      "cells_reassigned_to_parent_count": 2867,
+      "surface_assignment_adjusted": true,
+      "candidate_summary": {
+        "first_stable_offset_mm": 1.75,
+        "selected_offset_mm": 1.75,
+        "reference_offset_mm": 2.0,
+        "reference_radius_mm": 0.215242,
+        "best_stability_offset_mm": 2.0,
+        "lowest_contamination_offset_mm": 1.8,
+        "rejected_too_proximal_count": 21,
+        "invalid_cut_count": 0,
+        "fallback_used": false,
+        "zero_offset_selected": false,
+        "zero_offset_proof_passed": false,
+        "zero_offset_success_forbidden_reason": "",
+        "selected_reason": "last clean candidate before proximal parent contamination",
+        "surface_assignment_adjusted": true,
+        "cells_reassigned_to_parent_count": 2867
+      },
+      "surface_assignment_mode": "clipped_ring_boundary",
+      "ring_plane_assignment_tolerance_mm": 0.1,
+      "clip_boundary_used": true,
+      "clip_boundary_required": true,
+      "clip_boundary_unresolved": false,
+      "cells_reassigned_to_child_count": 4,
+      "cells_ambiguous_near_ring_count": 1276,
+      "ring_plane_parent_side_violation_count": 0,
+      "neighbor_contour_leak_count": 502,
+      "connected_component_cleanup_reassigned_count": 811,
+      "ring_surface_consistency_status": "requires_review"
+    },
+    {
+      "ring_id": 15,
+      "ring_label": "ring_015",
+      "ring_type": "branch_end",
+      "center_xyz": [
+        -2.3337307734609873,
+        19.39609335162334,
+        67.04729944706735
+      ],
+      "normal_xyz": [
+        -0.2772326516565048,
+        -0.49656832011162294,
+        -0.8225338657569207
+      ],
+      "radius_mm": 0.1870077495167721,
+      "source_segment_id": 8,
+      "parent_segment_id": 1,
+      "child_segment_id": 8,
+      "source_centerline_s_mm": 6.228862166778982,
+      "orientation_rule": "perpendicular_to_branch_centerline_tangent_near_segment_end",
+      "radius_rule": "local_equivalent_diameter_over_2",
+      "confidence": 0.85,
+      "status": "success",
+      "warnings": []
+    },
+    {
+      "ring_id": 16,
+      "ring_label": "ring_016",
+      "ring_type": "branch_start",
+      "center_xyz": [
+        -1.0928736265849317,
+        17.29398907837143,
+        64.3988695366591
+      ],
+      "normal_xyz": [
+        -0.032949272171323075,
+        -0.3041681237762405,
+        -0.9520483695389755
+      ],
+      "radius_mm": 0.6292599064508324,
+      "source_segment_id": 9,
+      "parent_segment_id": 1,
+      "child_segment_id": 9,
+      "source_centerline_s_mm": 1.5,
+      "orientation_rule": "perpendicular_to_child_centerline_tangent",
+      "radius_rule": "stable_child_tube_equivalent_radius",
+      "confidence": 0.84,
+      "status": "success",
+      "warnings": [
+        "proximal parent-wall contamination was detected and rejected before selecting this branch_start ring"
+      ],
+      "selection_algorithm": "surface_validated_branch_start_ring_v1",
+      "topology_start_xyz": [
+        -1.0228465795516968,
+        17.346933364868164,
+        65.88009643554688
+      ],
+      "selected_offset_mm": 1.5,
+      "search_max_mm": 2.0260190364997395,
+      "candidate_count": 30,
+      "accepted_candidate_count": 1,
+      "selected_candidate_classification": "stable_child_tube",
+      "selected_radius_rule": "stable_child_tube_equivalent_radius",
+      "surface_cut_used": true,
+      "backward_refinement_used": true,
+      "zero_offset_proof_passed": false,
+      "cells_reassigned_to_parent_count": 7718,
+      "surface_assignment_adjusted": true,
+      "candidate_summary": {
+        "first_stable_offset_mm": 1.5,
+        "selected_offset_mm": 1.5,
+        "reference_offset_mm": 2.026019,
+        "reference_radius_mm": 0.611695,
+        "best_stability_offset_mm": 2.026019,
+        "lowest_contamination_offset_mm": 2.0,
+        "rejected_too_proximal_count": 21,
+        "invalid_cut_count": 0,
+        "fallback_used": false,
+        "zero_offset_selected": false,
+        "zero_offset_proof_passed": false,
+        "zero_offset_success_forbidden_reason": "",
+        "selected_reason": "last clean candidate before proximal parent contamination",
+        "surface_assignment_adjusted": true,
+        "cells_reassigned_to_parent_count": 7718
+      },
+      "surface_assignment_mode": "clipped_ring_boundary",
+      "ring_plane_assignment_tolerance_mm": 0.1,
+      "clip_boundary_used": true,
+      "clip_boundary_required": true,
+      "clip_boundary_unresolved": false,
+      "cells_reassigned_to_child_count": 2,
+      "cells_ambiguous_near_ring_count": 239,
+      "ring_plane_parent_side_violation_count": 0,
+      "neighbor_contour_leak_count": 0,
+      "connected_component_cleanup_reassigned_count": 6512,
+      "ring_surface_consistency_status": "success"
+    },
+    {
+      "ring_id": 17,
+      "ring_label": "ring_017",
+      "ring_type": "branch_start",
+      "center_xyz": [
+        -4.162441269473873,
+        13.181463017620796,
+        61.50820413083993
+      ],
+      "normal_xyz": [
+        -0.5911394265869233,
+        -0.8015493198949527,
+        0.08984912971432854
+      ],
+      "radius_mm": 0.5587198258520626,
+      "source_segment_id": 10,
+      "parent_segment_id": 9,
+      "child_segment_id": 10,
+      "source_centerline_s_mm": 2.35,
+      "orientation_rule": "perpendicular_to_child_centerline_tangent",
+      "radius_rule": "stable_child_tube_equivalent_radius",
+      "confidence": 0.84,
+      "status": "success",
+      "warnings": [
+        "proximal parent-wall contamination was detected and rejected before selecting this branch_start ring"
+      ],
+      "selection_algorithm": "surface_validated_branch_start_ring_v1",
+      "topology_start_xyz": [
+        -2.3995490074157715,
+        14.630635261535645,
+        61.521705627441406
+      ],
+      "selected_offset_mm": 2.35,
+      "search_max_mm": 6.704324435608061,
+      "candidate_count": 74,
+      "accepted_candidate_count": 1,
+      "selected_candidate_classification": "stable_child_tube",
+      "selected_radius_rule": "stable_child_tube_equivalent_radius",
+      "surface_cut_used": true,
+      "backward_refinement_used": true,
+      "zero_offset_proof_passed": false,
+      "cells_reassigned_to_parent_count": 7640,
+      "surface_assignment_adjusted": true,
+      "candidate_summary": {
+        "first_stable_offset_mm": 2.35,
+        "selected_offset_mm": 2.35,
+        "reference_offset_mm": 5.75,
+        "reference_radius_mm": 0.569588,
+        "best_stability_offset_mm": 5.75,
+        "lowest_contamination_offset_mm": 3.65,
+        "rejected_too_proximal_count": 28,
+        "invalid_cut_count": 0,
+        "fallback_used": false,
+        "zero_offset_selected": false,
+        "zero_offset_proof_passed": false,
+        "zero_offset_success_forbidden_reason": "",
+        "selected_reason": "last clean candidate before proximal parent contamination",
+        "surface_assignment_adjusted": true,
+        "cells_reassigned_to_parent_count": 7640
+      },
+      "surface_assignment_mode": "clipped_ring_boundary",
+      "ring_plane_assignment_tolerance_mm": 0.1,
+      "clip_boundary_used": true,
+      "clip_boundary_required": true,
+      "clip_boundary_unresolved": false,
+      "cells_reassigned_to_child_count": 10,
+      "cells_ambiguous_near_ring_count": 234,
+      "ring_plane_parent_side_violation_count": 0,
+      "neighbor_contour_leak_count": 0,
+      "connected_component_cleanup_reassigned_count": 0,
+      "ring_surface_consistency_status": "success"
+    },
+    {
+      "ring_id": 18,
+      "ring_label": "ring_018",
+      "ring_type": "branch_end",
+      "center_xyz": [
+        -8.695407437158641,
+        18.291281920182417,
+        50.924651818783296
+      ],
+      "normal_xyz": [
+        0.07832555545990559,
+        -0.16797143654304733,
+        -0.9826752789541224
+      ],
+      "radius_mm": 0.5031862401941012,
+      "source_segment_id": 10,
+      "parent_segment_id": 9,
+      "child_segment_id": 10,
+      "source_centerline_s_mm": 19.15521267316589,
+      "orientation_rule": "perpendicular_to_branch_centerline_tangent_near_segment_end",
+      "radius_rule": "local_equivalent_diameter_over_2",
+      "confidence": 0.85,
+      "status": "success",
+      "warnings": []
+    },
+    {
+      "ring_id": 19,
+      "ring_label": "ring_019",
+      "ring_type": "branch_start",
+      "center_xyz": [
+        -2.7845815764006367,
+        13.258676375909204,
+        60.931606860074304
+      ],
+      "normal_xyz": [
+        -0.693313743902541,
+        -0.6861641971232997,
+        -0.2202152290419065
+      ],
+      "radius_mm": 0.43855367145398555,
+      "source_segment_id": 11,
+      "parent_segment_id": 9,
+      "child_segment_id": 11,
+      "source_centerline_s_mm": 1.65,
+      "orientation_rule": "perpendicular_to_child_centerline_tangent",
+      "radius_rule": "stable_child_tube_equivalent_radius",
+      "confidence": 0.68,
+      "status": "requires_review",
+      "warnings": [
+        "proximal parent-wall contamination was detected and rejected before selecting this branch_start ring",
+        "child-colored near-ring cells outside the local branch corridor were reassigned to the parent segment"
+      ],
+      "selection_algorithm": "surface_validated_branch_start_ring_v1",
+      "topology_start_xyz": [
+        -2.3995490074157715,
+        14.630635261535645,
+        61.521705627441406
+      ],
+      "selected_offset_mm": 1.65,
+      "search_max_mm": 2.3015782812457686,
+      "candidate_count": 25,
+      "accepted_candidate_count": 1,
+      "selected_candidate_classification": "stable_child_tube",
+      "selected_radius_rule": "stable_child_tube_equivalent_radius",
+      "surface_cut_used": true,
+      "backward_refinement_used": true,
+      "zero_offset_proof_passed": false,
+      "cells_reassigned_to_parent_count": 929,
+      "surface_assignment_adjusted": true,
+      "candidate_summary": {
+        "first_stable_offset_mm": 1.65,
+        "selected_offset_mm": 1.65,
+        "reference_offset_mm": 1.75,
+        "reference_radius_mm": 0.433405,
+        "best_stability_offset_mm": 1.75,
+        "lowest_contamination_offset_mm": 1.75,
+        "rejected_too_proximal_count": 20,
+        "invalid_cut_count": 0,
+        "fallback_used": false,
+        "zero_offset_selected": false,
+        "zero_offset_proof_passed": false,
+        "zero_offset_success_forbidden_reason": "",
+        "selected_reason": "last clean candidate before proximal parent contamination",
+        "surface_assignment_adjusted": true,
+        "cells_reassigned_to_parent_count": 929
+      },
+      "surface_assignment_mode": "clipped_ring_boundary",
+      "ring_plane_assignment_tolerance_mm": 0.1,
+      "clip_boundary_used": true,
+      "clip_boundary_required": true,
+      "clip_boundary_unresolved": false,
+      "cells_reassigned_to_child_count": 14,
+      "cells_ambiguous_near_ring_count": 238,
+      "ring_plane_parent_side_violation_count": 0,
+      "neighbor_contour_leak_count": 5,
+      "connected_component_cleanup_reassigned_count": 5,
+      "ring_surface_consistency_status": "requires_review"
+    },
+    {
+      "ring_id": 20,
+      "ring_label": "ring_020",
+      "ring_type": "branch_end",
+      "center_xyz": [
+        -3.337721687626924,
+        10.734690828248596,
+        58.79562311685544
+      ],
+      "normal_xyz": [
+        -0.06952714295716292,
+        -0.9667589400791566,
+        0.24605513237735957
+      ],
+      "radius_mm": 0.25640510201331257,
+      "source_segment_id": 11,
+      "parent_segment_id": 9,
+      "child_segment_id": 11,
+      "source_centerline_s_mm": 6.575937946416482,
+      "orientation_rule": "perpendicular_to_branch_centerline_tangent_near_segment_end",
+      "radius_rule": "local_equivalent_diameter_over_2",
+      "confidence": 0.85,
+      "status": "success",
+      "warnings": []
+    },
+    {
+      "ring_id": 21,
+      "ring_label": "ring_021",
+      "ring_type": "branch_start",
+      "center_xyz": [
+        0.05723788101465636,
+        16.875866200992157,
+        64.9162944242009
+      ],
+      "normal_xyz": [
+        0.6866772739097713,
+        -0.4585860947373715,
+        -0.5640683604044563
+      ],
+      "radius_mm": 0.6177702287234893,
+      "source_segment_id": 12,
+      "parent_segment_id": 1,
+      "child_segment_id": 12,
+      "source_centerline_s_mm": 1.55,
+      "orientation_rule": "perpendicular_to_child_centerline_tangent",
+      "radius_rule": "stable_child_tube_equivalent_radius",
+      "confidence": 0.68,
+      "status": "requires_review",
+      "warnings": [
+        "proximal parent-wall contamination was detected and rejected before selecting this branch_start ring",
+        "child-colored near-ring cells outside the local branch corridor were reassigned to the parent segment"
+      ],
+      "selection_algorithm": "surface_validated_branch_start_ring_v1",
+      "topology_start_xyz": [
+        -1.0228465795516968,
+        17.346933364868164,
+        65.88009643554688
+      ],
+      "selected_offset_mm": 1.55,
+      "search_max_mm": 2.581471003938696,
+      "candidate_count": 26,
+      "accepted_candidate_count": 1,
+      "selected_candidate_classification": "stable_child_tube",
+      "selected_radius_rule": "stable_child_tube_equivalent_radius",
+      "surface_cut_used": true,
+      "backward_refinement_used": true,
+      "zero_offset_proof_passed": false,
+      "cells_reassigned_to_parent_count": 2973,
+      "surface_assignment_adjusted": true,
+      "candidate_summary": {
+        "first_stable_offset_mm": 1.55,
+        "selected_offset_mm": 1.55,
+        "reference_offset_mm": 1.75,
+        "reference_radius_mm": 0.599892,
+        "best_stability_offset_mm": 1.5,
+        "lowest_contamination_offset_mm": 1.55,
+        "rejected_too_proximal_count": 19,
+        "invalid_cut_count": 0,
+        "fallback_used": false,
+        "zero_offset_selected": false,
+        "zero_offset_proof_passed": false,
+        "zero_offset_success_forbidden_reason": "",
+        "selected_reason": "last clean candidate before proximal parent contamination",
+        "surface_assignment_adjusted": true,
+        "cells_reassigned_to_parent_count": 2973
+      },
+      "surface_assignment_mode": "clipped_ring_boundary",
+      "ring_plane_assignment_tolerance_mm": 0.1,
+      "clip_boundary_used": true,
+      "clip_boundary_required": true,
+      "clip_boundary_unresolved": false,
+      "cells_reassigned_to_child_count": 5,
+      "cells_ambiguous_near_ring_count": 222,
+      "ring_plane_parent_side_violation_count": 0,
+      "neighbor_contour_leak_count": 213,
+      "connected_component_cleanup_reassigned_count": 1530,
+      "ring_surface_consistency_status": "requires_review"
+    },
+    {
+      "ring_id": 22,
+      "ring_label": "ring_022",
+      "ring_type": "branch_start",
+      "center_xyz": [
+        4.3210189747769565,
+        13.866316027704073,
+        61.039106593072134
+      ],
+      "normal_xyz": [
+        0.3850979476808294,
+        -0.7945715268437239,
+        -0.4694205570927274
+      ],
+      "radius_mm": 0.5048886322371728,
+      "source_segment_id": 13,
+      "parent_segment_id": 12,
+      "child_segment_id": 13,
+      "source_centerline_s_mm": 1.605248,
+      "orientation_rule": "perpendicular_to_child_centerline_tangent",
+      "radius_rule": "stable_child_tube_equivalent_radius",
+      "confidence": 0.68,
+      "status": "requires_review",
+      "warnings": [
+        "proximal parent-wall contamination was detected and rejected before selecting this branch_start ring",
+        "near-ring ambiguity exceeds 5 percent of the child segment surface cell count"
+      ],
+      "selection_algorithm": "surface_validated_branch_start_ring_v1",
+      "topology_start_xyz": [
+        3.9931862354278564,
+        15.233983039855957,
+        61.79496383666992
+      ],
+      "selected_offset_mm": 1.605248,
+      "search_max_mm": 6.20524827783495,
+      "candidate_count": 88,
+      "accepted_candidate_count": 1,
+      "selected_candidate_classification": "stable_child_tube",
+      "selected_radius_rule": "stable_child_tube_equivalent_radius",
+      "surface_cut_used": true,
+      "backward_refinement_used": true,
+      "zero_offset_proof_passed": false,
+      "cells_reassigned_to_parent_count": 2179,
+      "surface_assignment_adjusted": true,
+      "candidate_summary": {
+        "first_stable_offset_mm": 1.605248,
+        "selected_offset_mm": 1.605248,
+        "reference_offset_mm": 6.205248,
+        "reference_radius_mm": 0.482072,
+        "best_stability_offset_mm": 6.205248,
+        "lowest_contamination_offset_mm": 2.75,
+        "rejected_too_proximal_count": 23,
+        "invalid_cut_count": 0,
+        "fallback_used": false,
+        "zero_offset_selected": false,
+        "zero_offset_proof_passed": false,
+        "zero_offset_success_forbidden_reason": "",
+        "selected_reason": "last clean candidate before proximal parent contamination",
+        "surface_assignment_adjusted": true,
+        "cells_reassigned_to_parent_count": 2179
+      },
+      "surface_assignment_mode": "clipped_ring_boundary",
+      "ring_plane_assignment_tolerance_mm": 0.1,
+      "clip_boundary_used": true,
+      "clip_boundary_required": true,
+      "clip_boundary_unresolved": false,
+      "cells_reassigned_to_child_count": 2,
+      "cells_ambiguous_near_ring_count": 771,
+      "ring_plane_parent_side_violation_count": 0,
+      "neighbor_contour_leak_count": 0,
+      "connected_component_cleanup_reassigned_count": 0,
+      "ring_surface_consistency_status": "requires_review"
+    },
+    {
+      "ring_id": 23,
+      "ring_label": "ring_023",
+      "ring_type": "branch_end",
+      "center_xyz": [
+        7.7375377325013694,
+        19.747747517896578,
+        51.0600925286637
+      ],
+      "normal_xyz": [
+        0.11753059308753092,
+        -0.01423965823935988,
+        -0.9929671655305223
+      ],
+      "radius_mm": 0.44454285991113496,
+      "source_segment_id": 13,
+      "parent_segment_id": 12,
+      "child_segment_id": 13,
+      "source_centerline_s_mm": 17.729280793814144,
+      "orientation_rule": "perpendicular_to_branch_centerline_tangent_near_segment_end",
+      "radius_rule": "local_equivalent_diameter_over_2",
+      "confidence": 0.85,
+      "status": "success",
+      "warnings": []
+    },
+    {
+      "ring_id": 24,
+      "ring_label": "ring_024",
+      "ring_type": "branch_start",
+      "center_xyz": [
+        3.275435463101799,
+        14.146344474689522,
+        61.51169875022373
+      ],
+      "normal_xyz": [
+        -0.5708318038641119,
+        -0.6760403828684205,
+        -0.46596185726769895
+      ],
+      "radius_mm": 0.4006017037794151,
+      "source_segment_id": 14,
+      "parent_segment_id": 12,
+      "child_segment_id": 14,
+      "source_centerline_s_mm": 1.36355,
+      "orientation_rule": "perpendicular_to_child_centerline_tangent",
+      "radius_rule": "stable_child_tube_equivalent_radius",
+      "confidence": 0.68,
+      "status": "requires_review",
+      "warnings": [
+        "proximal parent-wall contamination was detected and rejected before selecting this branch_start ring",
+        "child-colored near-ring cells outside the local branch corridor were reassigned to the parent segment",
+        "near-ring ambiguity exceeds 5 percent of the child segment surface cell count"
+      ],
+      "selection_algorithm": "surface_validated_branch_start_ring_v1",
+      "topology_start_xyz": [
+        3.9931862354278564,
+        15.233983039855957,
+        61.79496383666992
+      ],
+      "selected_offset_mm": 1.36355,
+      "search_max_mm": 2.0635495528970296,
+      "candidate_count": 30,
+      "accepted_candidate_count": 1,
+      "selected_candidate_classification": "stable_child_tube",
+      "selected_radius_rule": "stable_child_tube_equivalent_radius",
+      "surface_cut_used": true,
+      "backward_refinement_used": true,
+      "zero_offset_proof_passed": false,
+      "cells_reassigned_to_parent_count": 663,
+      "surface_assignment_adjusted": true,
+      "candidate_summary": {
+        "first_stable_offset_mm": 1.36355,
+        "selected_offset_mm": 1.36355,
+        "reference_offset_mm": 2.06355,
+        "reference_radius_mm": 0.40412,
+        "best_stability_offset_mm": 2.06355,
+        "lowest_contamination_offset_mm": 2.06355,
+        "rejected_too_proximal_count": 19,
+        "invalid_cut_count": 0,
+        "fallback_used": false,
+        "zero_offset_selected": false,
+        "zero_offset_proof_passed": false,
+        "zero_offset_success_forbidden_reason": "",
+        "selected_reason": "last clean candidate before proximal parent contamination",
+        "surface_assignment_adjusted": true,
+        "cells_reassigned_to_parent_count": 663
+      },
+      "surface_assignment_mode": "clipped_ring_boundary",
+      "ring_plane_assignment_tolerance_mm": 0.1,
+      "clip_boundary_used": true,
+      "clip_boundary_required": true,
+      "clip_boundary_unresolved": false,
+      "cells_reassigned_to_child_count": 6,
+      "cells_ambiguous_near_ring_count": 247,
+      "ring_plane_parent_side_violation_count": 0,
+      "neighbor_contour_leak_count": 1,
+      "connected_component_cleanup_reassigned_count": 0,
+      "ring_surface_consistency_status": "requires_review"
+    },
+    {
+      "ring_id": 25,
+      "ring_label": "ring_025",
+      "ring_type": "branch_end",
+      "center_xyz": [
+        3.5692395359798663,
+        10.964354712542226,
+        58.68559788839325
+      ],
+      "normal_xyz": [
+        0.2955018357499973,
+        -0.6347799842250978,
+        -0.7139559066886179
+      ],
+      "radius_mm": 0.37554993547426996,
+      "source_segment_id": 14,
+      "parent_segment_id": 12,
+      "child_segment_id": 14,
+      "source_centerline_s_mm": 5.895855865420085,
+      "orientation_rule": "perpendicular_to_branch_centerline_tangent_near_segment_end",
+      "radius_rule": "local_equivalent_diameter_over_2",
+      "confidence": 0.85,
+      "status": "success",
+      "warnings": []
+    },
+    {
+      "ring_id": 26,
+      "ring_label": "ring_026",
+      "ring_type": "parent_pre_bifurcation",
+      "center_xyz": [
+        -2.156011086038206,
+        15.686323468322117,
+        77.66945354885608
+      ],
+      "normal_xyz": [
+        -0.002560596971487058,
+        0.40215757295041843,
+        -0.9155668898894164
+      ],
+      "radius_mm": 0.9766580824108877,
+      "source_segment_id": 1,
+      "parent_segment_id": null,
+      "child_segment_id": null,
+      "source_centerline_s_mm": 9.988357088872844,
+      "orientation_rule": "perpendicular_to_parent_centerline_tangent",
+      "radius_rule": "estimated",
+      "confidence": 0.55,
+      "status": "requires_review",
+      "warnings": [
+        "parent_pre_bifurcation is a first-pass ring"
+      ]
+    },
+    {
+      "ring_id": 27,
+      "ring_label": "ring_027",
+      "ring_type": "parent_pre_bifurcation",
+      "center_xyz": [
+        -1.2407558088951638,
+        17.312644144752415,
+        66.32869822999749
+      ],
+      "normal_xyz": [
+        0.4496090698151128,
+        0.05749715566446241,
+        -0.8913729642694385
+      ],
+      "radius_mm": 1.1107270494362298,
+      "source_segment_id": 1,
+      "parent_segment_id": null,
+      "child_segment_id": null,
+      "source_centerline_s_mm": 23.129862676114357,
+      "orientation_rule": "perpendicular_to_parent_centerline_tangent",
+      "radius_rule": "estimated",
+      "confidence": 0.55,
+      "status": "requires_review",
+      "warnings": [
+        "parent_pre_bifurcation is a first-pass ring"
+      ]
+    },
+    {
+      "ring_id": 28,
+      "ring_label": "ring_028",
+      "ring_type": "parent_pre_bifurcation",
+      "center_xyz": [
+        -2.060263926361623,
+        14.901694723690369,
+        61.76952088474102
+      ],
+      "normal_xyz": [
+        -0.5460532019532539,
+        -0.5839899856556144,
+        -0.6006509779319055
+      ],
+      "radius_mm": 0.6375303038491871,
+      "source_segment_id": 9,
+      "parent_segment_id": 1,
+      "child_segment_id": null,
+      "source_centerline_s_mm": 5.261081665660935,
+      "orientation_rule": "perpendicular_to_parent_centerline_tangent",
+      "radius_rule": "estimated",
+      "confidence": 0.55,
+      "status": "requires_review",
+      "warnings": [
+        "parent_pre_bifurcation is a first-pass ring"
+      ]
+    },
+    {
+      "ring_id": 29,
+      "ring_label": "ring_029",
+      "ring_type": "parent_pre_bifurcation",
+      "center_xyz": [
+        3.9056868694993563,
+        15.623546885566547,
+        62.09593538196496
+      ],
+      "normal_xyz": [
+        0.28026175211555426,
+        -0.6478895207526013,
+        -0.7083025619042221
+      ],
+      "radius_mm": 0.6284795474629423,
+      "source_segment_id": 12,
+      "parent_segment_id": 1,
+      "child_segment_id": null,
+      "source_centerline_s_mm": 6.844229360766375,
+      "orientation_rule": "perpendicular_to_parent_centerline_tangent",
+      "radius_rule": "estimated",
+      "confidence": 0.55,
+      "status": "requires_review",
+      "warnings": [
+        "parent_pre_bifurcation is a first-pass ring"
+      ]
+    },
+    {
+      "ring_id": 30,
+      "ring_label": "ring_030",
+      "ring_type": "parent_pre_bifurcation",
+      "center_xyz": [
+        -2.6716455753567603,
+        17.11111010125736,
+        79.05180746283476
+      ],
+      "normal_xyz": [
+        0.1823040829987541,
+        0.9109034550215688,
+        -0.3701622846154809
+      ],
+      "radius_mm": 0.4265470424782864,
+      "source_segment_id": 2,
+      "parent_segment_id": 1,
+      "child_segment_id": null,
+      "source_centerline_s_mm": 2.6562935828827436,
+      "orientation_rule": "perpendicular_to_parent_centerline_tangent",
+      "radius_rule": "estimated",
+      "confidence": 0.55,
+      "status": "requires_review",
+      "warnings": [
+        "parent_pre_bifurcation is a first-pass ring"
+      ]
+    }
+  ],
+  "bifurcations": [
+    {
+      "bifurcation_id": 1,
+      "bifurcation_label": "bifurcation_001",
+      "parent_segment_id": 1,
+      "child_segment_ids": [
+        5,
+        6,
+        7
+      ],
+      "parent_pre_bifurcation_ring_id": 26,
+      "daughter_start_ring_ids": [
+        8,
+        10,
+        12
+      ],
+      "status": "requires_review",
+      "warnings": [
+        "parent_pre_bifurcation is first-pass; daughter_start references reuse branch_start rings"
+      ]
+    },
+    {
+      "bifurcation_id": 2,
+      "bifurcation_label": "bifurcation_002",
+      "parent_segment_id": 1,
+      "child_segment_ids": [
+        9,
+        12
+      ],
+      "parent_pre_bifurcation_ring_id": 27,
+      "daughter_start_ring_ids": [
+        16,
+        21
+      ],
+      "status": "requires_review",
+      "warnings": [
+        "parent_pre_bifurcation is first-pass; daughter_start references reuse branch_start rings"
+      ]
+    },
+    {
+      "bifurcation_id": 3,
+      "bifurcation_label": "bifurcation_003",
+      "parent_segment_id": 9,
+      "child_segment_ids": [
+        10,
+        11
+      ],
+      "parent_pre_bifurcation_ring_id": 28,
+      "daughter_start_ring_ids": [
+        17,
+        19
+      ],
+      "status": "requires_review",
+      "warnings": [
+        "parent_pre_bifurcation is first-pass; daughter_start references reuse branch_start rings"
+      ]
+    },
+    {
+      "bifurcation_id": 4,
+      "bifurcation_label": "bifurcation_004",
+      "parent_segment_id": 12,
+      "child_segment_ids": [
+        13,
+        14
+      ],
+      "parent_pre_bifurcation_ring_id": 29,
+      "daughter_start_ring_ids": [
+        22,
+        24
+      ],
+      "status": "requires_review",
+      "warnings": [
+        "parent_pre_bifurcation is first-pass; daughter_start references reuse branch_start rings"
+      ]
+    },
+    {
+      "bifurcation_id": 5,
+      "bifurcation_label": "bifurcation_005",
+      "parent_segment_id": 2,
+      "child_segment_ids": [
+        3,
+        4
+      ],
+      "parent_pre_bifurcation_ring_id": 30,
+      "daughter_start_ring_ids": [
+        4,
+        6
+      ],
+      "status": "requires_review",
+      "warnings": [
+        "parent_pre_bifurcation is first-pass; daughter_start references reuse branch_start rings"
+      ]
+    }
+  ],
+  "warnings": [
+    "aortic_body end selected at first ambiguous trunk split; downstream branch grouping requires review",
+    "aortic_body path was resolved by centerline support counts and requires visual review",
+    "surface cells were assigned by nearest centerline segment and then corrected using selected branch_start ring planes",
+    "38778 branch cell(s) were reassigned to parent segments by ring-plane gating"
+  ],
+  "metrics": {
+    "segment_count": 14,
+    "branch_count": 13,
+    "bifurcation_count": 5,
+    "ring_count": 30,
+    "visible_ring_count": 12,
+    "branch_start_ring_count": 12,
+    "non_branch_start_visible_ring_count": 0,
+    "hidden_or_suppressed_duplicate_ring_count": 18,
+    "ring_plane_assignment_tolerance_mm": 0.1,
+    "ring_plane_parent_side_violation_total": 0,
+    "ambiguous_near_ring_total": 10638,
+    "high_ambiguity_ring_count": 6,
+    "clip_boundary_used": true,
+    "clip_boundary_required_count": 13,
+    "clip_boundary_unresolved_count": 0,
+    "segments_with_color_crossing_ring_count": 0,
+    "segments_with_neighbor_contour_leak_count": 7,
+    "surface_cell_count": 232637,
+    "unassigned_cell_count": 0,
+    "requires_review_ring_count": 16,
+    "failed_ring_count": 0
+  }
+}

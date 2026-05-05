@@ -4,7 +4,8 @@
 
 Clean the repository into a small, contract-driven pipeline before expanding STEP2/STEP4
 behavior. The active target is `STEP1 -> STEP2 -> STEP3 -> STEP4 -> STEP5`, with STEP2
-as the strict geometry-authoring contract.
+as the strict geometry-authoring contract and STEP4 as the future EVAR geometry
+measurement contract.
 
 ## Current Work
 
@@ -31,7 +32,8 @@ as the strict geometry-authoring contract.
 ## STEP3 / STEP4 / STEP5
 
 - STEP3 must consume canonical STEP2 contracts without legacy-mode dependence.
-- STEP4 remains a scaffold until the measurement logic is ported deliberately.
+- STEP4 remains a scaffold until EVAR geometry measurement logic is implemented.
+- Future STEP4 implementation must follow `resources/step4_measurement_contract.md`.
 - STEP5 validates required outputs and reports `success`, `requires_review`, or `failed`.
 
 ## Verification

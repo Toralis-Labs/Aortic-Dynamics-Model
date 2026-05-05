@@ -25,9 +25,11 @@
 
 ## STEP4
 
-- [ ] Port measurement logic into `src/step4`.
+- [ ] Add future implementation under `src/step4/evar_geometry_measurements.py`.
+- [ ] Keep/adjust root wrapper later as needed.
 - [ ] Write `step4_measurements.json`.
-- [ ] Write `infrarenal_neck_colored.vtp`.
+- [ ] Write `step4_evar_geometry_regions.vtp`.
+- [ ] Follow `resources/step4_measurement_contract.md`.
 
 ## STEP5
 
