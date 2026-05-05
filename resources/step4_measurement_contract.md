@@ -11,12 +11,23 @@ catalogue matching, tissue assessment, or surgeon review. It must not infer thro
 calcification, plaque, clinical contraindications, final device compatibility, or final
 access suitability from a lumen-only model.
 
+STEP4 measures aortic neck, iliac, common iliac, external iliac, internal iliac,
+renal-to-internal-iliac path length, and access-vessel lumen geometry from STEP3 named
+anatomy.
+
 Preferred future names:
 
 - Root wrapper: `step4_evar_geometry_measurements.py`
 - Package implementation: `src/step4/evar_geometry_measurements.py`
 - Main JSON output: `step4_measurements.json`
 - Visual/debug output: `step4_evar_geometry_regions.vtp`
+
+## Compatibility wrapper note
+
+`step4_infrarenal_neck.py` is an existing root wrapper name and may be retained
+temporarily for compatibility. It must not define the conceptual scope of STEP4. Future
+implementation should be `src/step4/evar_geometry_measurements.py`, and a future root
+wrapper may be `step4_evar_geometry_measurements.py`.
 
 ## Inputs from STEP3
 
@@ -53,8 +64,7 @@ STEP4 core outputs are:
 - `step4_evar_geometry_regions.vtp`
 
 `step4_evar_geometry_regions.vtp` should visualize measurement regions, planes, and
-paths across the EVAR geometry measurement layer. It is not an infrarenal-neck-only
-artifact.
+paths across the full EVAR geometry measurement layer.
 
 ## Status vocabulary
 
@@ -105,14 +115,17 @@ Diameter measurements may also include:
 }
 ```
 
-Generic bilateral summary fields must include at least:
+Generic bilateral summary fields must include:
 
 ```json
 {
+  "status": "derived_summary",
+  "summary_rule": "side_specific_values_preferred",
+  "left_ref": "<left_field_name>",
+  "right_ref": "<right_field_name>",
   "left_value": null,
   "right_value": null,
-  "summary_rule": "side_specific_values_preferred",
-  "status": "derived_summary",
+  "unit": "mm|degrees|ratio|none",
   "notes": []
 }
 ```
@@ -233,6 +246,8 @@ Aortic neck diameter:
 - Set `proximal_neck_diameter_mm` to `proximal_neck_equivalent_diameter_mm`.
 - Preserve `proximal_neck_major_diameter_mm` and `proximal_neck_minor_diameter_mm`
   separately.
+- STEP4 reports geometry only; later device-matching logic may choose which diameter
+  type to use for IFU/catalogue logic.
 
 Infrarenal aortic neck treatment diameter:
 
@@ -251,14 +266,19 @@ Proximal neck length:
 
 - Measure centerline distance from the lowest renal artery reference to a candidate neck
   end.
-- STEP4 must not invent a clinically definitive aneurysm-neck-end detector.
-- STEP4 may identify a candidate neck end using a provisional geometric rule only if the
-  method is explicitly documented.
+- `proximal_neck_length_mm` should be a provisional measured value when sufficient
+  aortic profile data exists.
+- The candidate neck end is a provisional geometric detection based on downstream
+  aortic diameter profile expansion.
+- Default provisional rule: candidate neck end = first downstream aortic profile
+  location where equivalent diameter shows sustained expansion relative to
+  D0/proximal baseline across consecutive samples.
+- Store `candidate_neck_end_abscissa_mm`, `baseline_diameter_mm`, `expansion_rule`,
+  `profile_samples`, `confidence`, and notes/warnings.
+- Label the value as provisional/profile-derived, not definitive clinical truth.
 - If candidate neck end is not robustly detected, mark `proximal_neck_length_mm` as
   `requires_review`.
-- Store diameter profile samples downstream from the lowest renal artery.
-- Future implementation may use a profile-based rule, but it must output confidence and
-  not claim clinical certainty.
+- STEP4 must not claim definitive clinical aneurysm-neck-end detection.
 
 Proximal neck angulation:
 
@@ -269,10 +289,11 @@ Proximal neck angulation:
 
 Diameter profile sampling:
 
-- Use 1-2 mm internal sampling along centerline where practical.
+- Use 1-2 mm internal sampling along the aortic centerline where practical.
 - Explicitly report clinically useful offsets where possible: D0, D5, D10, D15 from the
   lowest renal artery.
-- Store measurement-plane metadata and QA.
+- Store measurement-plane metadata and QA for each sampled plane.
+- Use profile samples to support the provisional neck-length detector.
 
 Iliac treatment diameter:
 
@@ -355,10 +376,13 @@ summaries and must not blindly collapse side-specific values into a single numbe
 
 A generic field must include:
 
+- `status`
+- `summary_rule`
+- `left_ref`
+- `right_ref`
 - `left_value`
 - `right_value`
-- `summary_rule`
-- `status`
+- `unit`
 - `notes`
 
 Examples of valid `summary_rule`:
@@ -372,8 +396,17 @@ Examples of valid `summary_rule`:
 
 For this resource contract, use:
 
-```text
-summary_rule = "side_specific_values_preferred"
+```json
+{
+  "status": "derived_summary",
+  "summary_rule": "side_specific_values_preferred",
+  "left_ref": "<left_field_name>",
+  "right_ref": "<right_field_name>",
+  "left_value": null,
+  "right_value": null,
+  "unit": "mm|degrees|ratio|none",
+  "notes": []
+}
 ```
 
 Downstream IFU/device matching rules can later decide whether min, max, side-specific, or

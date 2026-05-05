@@ -13,7 +13,7 @@
 
 - STEP2: `step2_geometry_contract.py`
 - STEP3: `step3_naming_orientation.py`
-- STEP4: `step4_evar_geometry_measurements.py`
+- STEP4 future preferred root wrapper/name: `step4_evar_geometry_measurements.py`
 - STEP5: `step5_pipeline_manifest.py`
 
 ## STEP2
@@ -39,15 +39,28 @@
 
 ## STEP4
 
-- STEP4 is the EVAR lumen-geometry measurement layer described in
-  `resources/step4_measurement_contract.md`.
-- STEP4 writes grouped machine-readable measurements to `step4_measurements.json`.
-- STEP4 visual/debug regions are written to `step4_evar_geometry_regions.vtp`.
-- Unmeasurable individual values use `{ "status": "unmeasurable" }`.
+- Conceptual STEP4 scope is `STEP4_EVAR_GEOMETRY_MEASUREMENTS`.
+- STEP4 measures aortic neck, iliac, common iliac, external iliac, internal iliac,
+  renal-to-internal-iliac path length, and access-vessel lumen geometry from STEP3 named
+  anatomy.
+- STEP4 writes grouped machine-readable EVAR lumen-geometry measurements from STEP3
+  named anatomy.
+- Existing `step4_infrarenal_neck.py` is only a compatibility-wrapper name until the
+  implementation is updated; it is not the conceptual scope of STEP4.
+- Future implementation should live under `src/step4/evar_geometry_measurements.py`.
+- Future preferred root wrapper/name is `step4_evar_geometry_measurements.py`.
+- STEP4 core outputs are `step4_measurements.json` and
+  `step4_evar_geometry_regions.vtp`.
+- Unmeasurable individual values use object status, not missing raw numbers.
 - Missing required anatomy for a measurement group marks that group as
   `unmeasurable` or `requires_review`.
-- Missing internal iliac anatomy should not globally fail STEP4 if standard
-  AAA/Conformable measurements can still run.
+- Missing internal iliac branches do not globally fail STEP4.
+- Standard AAA/Conformable aortic neck and iliac measurements can still succeed without
+  internal iliac branches.
+- IBE-specific internal iliac and renal-to-internal-iliac fields become
+  `unmeasurable` or `requires_review` if internal iliac branches are missing.
+- STEP4 must not measure tissue variables, clinical intake variables, IFU/device
+  matching, catalogue matching, component selection, or final suitability.
 - Global failure applies only if STEP3 inputs are missing/unusable or required
   aortic/iliac anatomy is so incomplete that STEP4 cannot produce a trustworthy
   contract.

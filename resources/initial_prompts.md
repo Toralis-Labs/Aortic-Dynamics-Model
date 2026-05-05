@@ -12,8 +12,9 @@ device workflows can consume.
   vessel-like surface segments, a single aorta trunk centerline, and assignment QA.
 - STEP3 consumes STEP2 geometry and adds anatomical vessel names and landmark metadata.
 - STEP4 will measure aortic neck, iliac, common iliac, external iliac, internal iliac,
-  renal-to-internal-iliac path length, and access-vessel lumen geometry measurements
-  from STEP3 anatomy.
+  renal-to-internal-iliac path length, and access-vessel lumen geometry from STEP3
+  named anatomy. STEP4 does not measure tissue variables, clinical intake variables,
+  device compatibility, or final suitability.
 - STEP5 validates required step outputs and aggregates statuses/warnings.
 
 ## Core Principles

@@ -25,11 +25,14 @@
 
 ## STEP4
 
-- [ ] Add future implementation under `src/step4/evar_geometry_measurements.py`.
-- [ ] Keep/adjust root wrapper later as needed.
+- [ ] Implement future Step 4 geometry logic under
+  `src/step4/evar_geometry_measurements.py`.
+- [ ] Keep `step4_infrarenal_neck.py` only as a compatibility wrapper if needed.
 - [ ] Write `step4_measurements.json`.
 - [ ] Write `step4_evar_geometry_regions.vtp`.
 - [ ] Follow `resources/step4_measurement_contract.md`.
+- [ ] Keep Step 4 limited to lumen-geometry measurements; do not add tissue, clinical,
+  IFU, catalogue, or device-selection logic.
 
 ## STEP5
 

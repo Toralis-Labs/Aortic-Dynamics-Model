@@ -34,6 +34,12 @@ measurement contract.
 - STEP3 must consume canonical STEP2 contracts without legacy-mode dependence.
 - STEP4 remains a scaffold until EVAR geometry measurement logic is implemented.
 - Future STEP4 implementation must follow `resources/step4_measurement_contract.md`.
+- Future STEP4 implementation should live under
+  `src/step4/evar_geometry_measurements.py`.
+- Existing root `step4_infrarenal_neck.py` may remain temporarily as a compatibility
+  wrapper; it is not the conceptual scope of STEP4.
+- Keep STEP4 limited to lumen-geometry measurements; do not add tissue, clinical, IFU,
+  catalogue, device-matching, or final suitability logic.
 - STEP5 validates required outputs and reports `success`, `requires_review`, or `failed`.
 
 ## Verification
